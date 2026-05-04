@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~80%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~90%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
@@ -190,6 +190,24 @@ stores the resulting `PreSharedKeyId`, and then drives the T commit
 with a PSK proposal. `prepare_partial_commit` drives a T-session-only
 commit when policy permits.
 
+**Implementation note (2026-05-04, auto-classification):** the
+"external join → FULL" and "credential rotation → FULL" rows in the
+table above are now wired end-to-end inside
+[`openmls/src/group/apq_commit.rs`](./openmls/src/group/apq_commit.rs).
+`detect_external_join` / `detect_credential_rotation` walk a
+`StagedCommit`'s proposals; `classify_proposal_types` projects a list
+of `ProposalType`s onto the highest-priority `CommitTrigger` using a
+strict priority ladder (ExternalInit > Add > Remove > Update >
+everything-else), and `auto_classify_commit_type` routes the chosen
+trigger through `PqPolicy::required_commit_type`. The conversation
+surface picks the new logic up via
+`KChatMlsConversation::classify_incoming_commit`, which the
+orchestration layer can call when processing an incoming commit to
+decide whether the next outgoing commit needs to be FULL or PARTIAL.
+The conservative bias of the priority ladder means that any commit
+carrying an ExternalInit or membership change collapses to FULL even
+when bundled with an Update.
+
 ## Phase 6 — Enforce No-Downgrade Rules
 
 Once a conversation has reached `PQ_REQUIRED`, the orchestration layer (and
@@ -282,6 +300,35 @@ fallback) and
 [`openmls/tests/pq_welcome_fanout_tests.rs`](./openmls/tests/pq_welcome_fanout_tests.rs)
 (100 / 500 / 1000-member fanout pinning the ~2669-byte / PQ
 KeyPackage budget). Run them with `cargo test -- --ignored`.
+
+**Draft codepoint migration.** Until IANA assigns final codepoints
+the migration plumbing in
+[`openmls/src/ciphersuite/codepoint_migration.rs`](./openmls/src/ciphersuite/codepoint_migration.rs)
+holds three empty static `&[Row]` tables (ciphersuite / KEM /
+signature scheme). `migrate_ciphersuite` / `migrate_kem_type` /
+`migrate_signature_scheme` return `None` while a draft codepoint is
+still draft, `needs_migration` lights up for every draft suite, and
+`migrate_conversation_state` rotates
+`ConversationSecurityState::pinned_ciphersuite` once a final value is
+on file. Adding a real assignment is therefore a one-row table change
+and immediately fires across every persisted conversation on the next
+boot.
+
+**Idempotent client storage migration.** The Phase 0–6 storage
+contract enumerated under "Storage Requirements" in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) is driven by
+[`openmls/src/group/storage_migration.rs`](./openmls/src/group/storage_migration.rs).
+`MigrationStep` is the ordered list (group state → APQ info →
+conversation mapping → PSK material → commit counters →
+anti-downgrade state); `StorageMigrationState` is the persisted
+progress marker; `StorageMigrator::run_migration` runs each step
+check-before-write, persists progress between steps, and resumes
+cleanly from the marker on the next start. Concrete backends
+(SQLite, Sled, etc.) plug in via the `MigrationStorage` trait. This
+is the canonical implementation of the "storage migration must be
+idempotent so that a client can be upgraded, crash mid-migration, and
+re-run the migration safely on next start" requirement and is a
+prerequisite for the PQ-version storage gate below.
 
 ## Rollout Gates
 

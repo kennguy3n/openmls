@@ -220,6 +220,36 @@ and `messages` modules respectively.
   `CapabilityUpdateNotification` with TLS codecs, signature
   verification on every accepted capability, and a registry-backed
   publish/fetch/notification flow on top of `CapabilityRegistry`.
+- [`ciphersuite::codepoint_migration`](./openmls/src/ciphersuite/codepoint_migration.rs)
+  — single source of truth for draft → final IANA codepoint
+  migration. The static `CodepointMigration` table is currently empty
+  (no IANA assignments yet), so every `migrate_ciphersuite` /
+  `migrate_kem_type` / `migrate_signature_scheme` lookup returns
+  `None`, but `needs_migration` lights up for every draft suite and
+  `migrate_conversation_state` rotates a
+  `ConversationSecurityState::pinned_ciphersuite` in place once a row
+  is added to the table.
+- [`group::storage_migration`](./openmls/src/group/storage_migration.rs)
+  — idempotent client-side storage migration driver. `MigrationStep`
+  is the ordered list (`MigrateGroupState` → `MigrateApqInfo` →
+  `MigrateConversationMapping` → `MigratePskMaterial` →
+  `MigrateCommitCounters` → `MigrateAntiDowngradeState`),
+  `StorageMigrationState` is the persisted progress marker
+  (`NotStarted` / `InProgress(step)` / `Complete` / `Failed(reason)`),
+  and `StorageMigrator` is the driver that runs each step
+  check-before-write, persists progress between steps, and resumes
+  cleanly from the marker on the next start. Concrete backends plug
+  in via the `MigrationStorage` trait.
+- [`group::apq_commit::auto_classify_commit_type`](./openmls/src/group/apq_commit.rs)
+  — Phase 5 trigger auto-classification.
+  `detect_external_join` / `detect_credential_rotation` walk a
+  `StagedCommit`'s proposals; `classify_proposal_types` maps a list
+  of `ProposalType`s onto the highest-priority `CommitTrigger`
+  (ExternalInit > Add > Remove > Update > everything-else);
+  `auto_classify_commit_type` routes the trigger through
+  `PqPolicy::required_commit_type`. The conversation surface
+  `KChatMlsConversation::classify_incoming_commit` exposes the whole
+  pipeline as a single method.
 
 ## Supported ciphersuites
 

@@ -31,6 +31,7 @@ pub mod no_downgrade;
 pub mod pq_policy;
 pub mod pq_telemetry;
 pub mod reinit_upgrade;
+pub mod storage_migration;
 
 // Public
 pub use errors::*;
@@ -48,8 +49,9 @@ pub use mls_group::{Member, *};
 pub use public_group::*;
 
 pub use apq_commit::{
-    prepare_full_commit, prepare_partial_commit, ApqCommitError, FullCommitResult,
-    PartialCommitResult,
+    auto_classify_commit_type, classify_proposal_types, detect_credential_rotation,
+    detect_external_join, prepare_full_commit, prepare_partial_commit, ApqCommitError,
+    FullCommitResult, PartialCommitResult,
 };
 pub use apq_resync::{
     detect_desync, force_resync, resync_from_pq, resync_from_t, ApqResyncError, DesyncReport,
@@ -76,6 +78,10 @@ pub use reinit_upgrade::{
     commit_reinit, complete_reinit, complete_reinit_from_commit,
     complete_reinit_from_commit_with_emitter, propose_reinit, ReInitCommit, ReInitError,
     ReInitPlan, ReInitResumption,
+};
+pub use storage_migration::{
+    MigrationError as StorageMigrationDriverError, MigrationStep, MigrationStorage,
+    MigrationValidationError, StorageMigrationState, StorageMigrator,
 };
 
 // Private

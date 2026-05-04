@@ -210,6 +210,20 @@ IANA codepoint (e.g. no-downgrade enforcement, telemetry, capability
 advertisement) should consult these helpers rather than hard-coding the set
 of draft suites.
 
+The actual draft → final translation lives in
+[`ciphersuite::codepoint_migration`](./openmls/src/ciphersuite/codepoint_migration.rs).
+The `CodepointMigration` struct holds three static `&[Row]` tables for
+ciphersuites, KEMs, and signature schemes; today every table is empty
+because no IANA assignments have been made, so every `migrate_*` lookup
+returns `None` while `needs_migration` continues to return `true` for
+every draft codepoint. When IANA does assign a final value, dropping a
+single row into the appropriate table makes
+`migrate_conversation_state` automatically rotate
+`ConversationSecurityState::pinned_ciphersuite` for any conversation
+still pinned to the draft. This separates "knowing a codepoint is a
+draft" (the type-level helper) from "knowing what the final codepoint
+is" (the migration table).
+
 ## KChat Orchestration Layer
 
 The orchestration layer lives **inside this fork** of OpenMLS — it is
@@ -272,6 +286,9 @@ The orchestration layer is implemented as the following modules in the
 | `MigrationStateMachine` / `MigrationEvent` / `ConversationLifecycle` | `openmls/src/group/migration_state.rs`         | Per-conversation upgrade lifecycle state machine: 8 fine-grained states from `NotStarted` through `Operational` / `Failed`. The `ConversationLifecycle` projection collapses these onto eight named phases (Classical, UpgradeEligible, UpgradeProposed, UpgradeInProgress, PqActive, ApqBootstrapping, ApqActive, Failed). `KChatMlsConversation::migration_state` now holds an `Option<MigrationStateMachine>` and `lifecycle()` returns the projection. |
 | `ApqMessage` / `ApqCommitPair` / `ApqDeliveryOrder` | `openmls/src/messages/apq_delivery.rs`           | Delivery Service APQ wire wrapper. `ApqMessage` pairs a payload with a `SessionSide` marker; `ApqCommitPair` bundles a PQ commit + T commit + a declared `ApqDeliveryOrder` (PqFirst, TFirst, Independent); `validate_order` rejects misordered FULL pairs. Mirrored in `delivery-service/ds-lib/src/apq.rs` as an `ApqEnvelope` tagged union. |
 | `CapabilityPublishRequest` / `CapabilityFetchRequest` / `CapabilityUpdateNotification` | `openmls/src/credentials/capability_protocol.rs`     | Wire protocol for client/server capability exchange. Publish / fetch / notification request-response messages with TLS codecs and signature verification, layered on top of the existing in-memory `CapabilityRegistry`. |
+| `CodepointMigration`                       | `openmls/src/ciphersuite/codepoint_migration.rs`         | Single source of truth for draft → final IANA codepoint migration. Three static `&[Row]` tables (ciphersuite / KEM / signature scheme) — empty today, populated as IANA assigns finals. `migrate_ciphersuite` / `migrate_kem_type` / `migrate_signature_scheme` look up the final value, `needs_migration` flags any draft codepoint independent of whether a final exists, and `migrate_conversation_state` rotates `ConversationSecurityState::pinned_ciphersuite` once a final lands. |
+| `StorageMigrator` / `MigrationStorage` / `MigrationStep` | `openmls/src/group/storage_migration.rs`         | Idempotent client-side storage migration driver. `MigrationStep` is the ordered list (group state → APQ info → conversation mapping → PSK material → commit counters → anti-downgrade state); `StorageMigrationState` is the persisted progress marker (`NotStarted` / `InProgress(step)` / `Complete` / `Failed(reason)`); `StorageMigrator::run_migration` runs each step check-before-write, persists progress between steps, and resumes from the marker on the next start. Concrete backends plug in via the `MigrationStorage` trait. |
+| `auto_classify_commit_type` / `classify_proposal_types` / `detect_external_join` / `detect_credential_rotation` | `openmls/src/group/apq_commit.rs` | Phase 5 trigger auto-classification: walks a `StagedCommit`'s proposals, projects them onto the highest-priority `CommitTrigger` (ExternalInit > Add > Remove > Update > everything-else), and routes the trigger through `PqPolicy::required_commit_type`. `KChatMlsConversation::classify_incoming_commit` exposes the whole pipeline as a single conversation method. |
 
 FULL and PARTIAL commits are wired through `MlsGroup::commit_builder`:
 `prepare_full_commit` runs the PQ commit first, derives `apq_psk` via
@@ -337,7 +354,16 @@ Clients must persist enough state to recover both sessions deterministically:
   policy floor).
 
 Storage migration must be **idempotent** so that a client can be upgraded,
-crash mid-migration, and re-run the migration safely on next start.
+crash mid-migration, and re-run the migration safely on next start. The
+[`group::storage_migration`](./openmls/src/group/storage_migration.rs)
+module ships the canonical driver: an ordered `MigrationStep` enum
+(group state → APQ info → conversation mapping → PSK material → commit
+counters → anti-downgrade state), a persisted `StorageMigrationState`
+marker (`NotStarted` / `InProgress(step)` / `Complete` /
+`Failed(reason)`), and a `StorageMigrator` that runs each step
+check-before-write, persists progress between steps, and resumes from
+the marker on the next start. Concrete backends (SQLite, Sled, etc.)
+plug in by implementing the `MigrationStorage` trait.
 
 ## Main Risks
 
