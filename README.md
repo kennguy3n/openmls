@@ -19,9 +19,73 @@ It has a safe and easy-to-use interface that hides the complexity of the underly
 
 ## Supported ciphersuites
 
+### Classical (production)
+
 - MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 (MTI)
 - MLS_128_DHKEMP256_AES128GCM_SHA256_P256
 - MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
+
+### Post-Quantum (in progress)
+
+This fork adds post-quantum (PQ) and PQ/classical hybrid ciphersuites. They are
+still tracking IETF/NIST drafts and are gated behind the libcrux provider; the
+RustCrypto provider does **not** implement any PQ primitives.
+
+- **MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519** — X-Wing hybrid KEM
+  (ML-KEM-768 + X25519), draft codepoint `0x004D`, libcrux provider only.
+  Use only with the `libcrux-provider` feature; selecting this suite on the
+  RustCrypto provider currently **panics** (`unimplemented!`) — replacing
+  this with an `UnsupportedCiphersuite` error is tracked in
+  [`PROGRESS.md`](./PROGRESS.md). Provides HNDL-bridge confidentiality with
+  classical Ed25519 authenticity.
+
+Planned, tracking the
+[IETF MLS PQ ciphersuite draft](https://datatracker.ietf.org/doc/draft-ietf-mls-mls-pq-cs/)
+(codepoints TBD until IANA assignment):
+
+- ML-KEM hybrid suites (ML-KEM + X25519/P-256, classical signatures) for
+  `PQ_CONFIDENTIALITY` deployments.
+- Pure ML-KEM suites (FIPS 203) once the IETF draft stabilizes.
+- ML-DSA signature suites (FIPS 204) for `PQ_AUTHENTICITY` deployments.
+
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`PHASES.md`](./PHASES.md), and
+[`PROGRESS.md`](./PROGRESS.md) for the full roadmap.
+
+## Quantum Resistance Roadmap
+
+This fork is being upgraded to provide quantum-resistant end-to-end encryption
+for [KChat](https://github.com/kennguy3n) at production scale, on top of the
+upstream OpenMLS RFC 9420 base.
+
+The roadmap is structured around three security modes:
+
+- **CLASSICAL** — current MLS ciphersuites; legacy devices and groups.
+- **PQ_CONFIDENTIALITY** — hybrid/PQ KEM with classical signatures; defends
+  against "harvest now, decrypt later" (HNDL) attacks. Near-term default.
+- **PQ_AUTHENTICITY** — hybrid/PQ KEM **plus** ML-DSA signatures; full PQ
+  protection for high-risk groups, longer-term default.
+
+Migration is two-track:
+
+1. **Direct hybrid/PQ MLS** for new 1:1 chats and small groups, using a single
+   PQ ciphersuite end-to-end (and `ReInit` for upgrading existing small
+   groups).
+2. **APQ-MLS combiner** for medium and large groups, where each conversation
+   runs a classical (`T`) MLS session in parallel with a PQ MLS session and
+   periodically injects PQ-derived secrets into the `T` session as a PSK. This
+   keeps per-message overhead classical while still providing PQ
+   confidentiality.
+
+Details:
+
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — standards basis, security modes,
+  APQ-MLS combiner, decision matrix, ciphersuite roadmap, KChat orchestration
+  layer, storage requirements, and risks.
+- [`PHASES.md`](./PHASES.md) — phased migration plan (capabilities,
+  KeyPackages, new conversations, ReInit, APQ bootstrap, FULL/PARTIAL policy,
+  no-downgrade, server components, rollout gates).
+- [`PROGRESS.md`](./PROGRESS.md) — current implementation status, version
+  targets, and known gaps.
 
 ## Supported platforms
 
@@ -56,6 +120,16 @@ on existing implementations of the cryptographic primitives used by MLS. There
 are two different cryptography providers implemented right now. But consumers
 can bring their own implementation. See [traits](https://github.com/openmls/openmls/tree/main/traits) for more
 details.
+
+- **libcrux** ([`libcrux_crypto`](./libcrux_crypto)) — formally verified PQ-capable
+  provider. This is the provider used for any of the post-quantum or hybrid
+  ciphersuites listed above (currently X-Wing draft-06; ML-KEM and ML-DSA as
+  the IETF MLS PQ draft and libcrux gain support).
+- **RustCrypto** ([`openmls_rust_crypto`](./openmls_rust_crypto)) — pure-Rust
+  classical provider. **Does not support any PQ ciphersuite.** Selecting a PQ
+  ciphersuite (e.g. `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`) with this
+  provider must return an `UnsupportedCiphersuite` error rather than panic;
+  hardening this surface is tracked in [`PROGRESS.md`](./PROGRESS.md).
 
 ## Features
 OpenMLS provides the following features
