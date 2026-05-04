@@ -37,21 +37,25 @@ pub enum ConversationUpgradeError {
 /// Pick the [`SecurityMode`] and ciphersuite for a new conversation given
 /// the participants' [`DeviceCapability`]s.
 ///
-/// Returns `(mode, Some(ciphersuite))` if a common suite exists for the
-/// selected mode, or `(mode, None)` if no common suite can be found at the
-/// strongest mode the peers support. Callers should treat the `None` case
-/// as fail-closed at the `mode` level (do not silently downgrade).
+/// Returns `(mode, ciphersuite)` for the strongest mode the peers can
+/// agree on, or [`ConversationUpgradeError::NoCommonCiphersuite`] if no
+/// shared suite exists at any acceptable tier.
 ///
 /// Selection rules (Phase 2):
 ///
-/// - If **all** peers support `PqAuthenticity` (i.e. `pq_auth_supported &&
-///   supports_pq()` for every peer) and a common PqAuthenticity suite
-///   exists → `(PqAuthenticity, Some(cs))`.
-/// - Else if **all** peers support PQ (have a non-empty `pq_ciphersuites`
-///   list) and a common PqConfidentiality suite exists →
-///   `(PqConfidentiality, Some(cs))`.
-/// - Else → `(Classical, Some(best_classical))` if a common classical suite
-///   exists, otherwise `Err(NoCommonCiphersuite)` for `Classical`.
+/// - If **all** peers support `PqAuthenticity` (`pq_auth_supported`) and a
+///   common PqAuthenticity suite exists → `(PqAuthenticity, cs)`.
+/// - Else if **all** peers support PQ (non-empty `pq_ciphersuites`) and a
+///   common PqConfidentiality suite exists → `(PqConfidentiality, cs)`.
+/// - Else → `(Classical, best_classical)` if a common classical suite
+///   exists.
+///
+/// Cascade scope: when the target mode is PQ but no suite is available
+/// for that exact tier, we walk **within PQ** (PqAuthenticity →
+/// PqConfidentiality) so peers who advertise readiness for the higher
+/// tier are not punished for missing a PqAuthenticity-grade suite. We
+/// never silently fall back from PQ to Classical — that is the
+/// PHASES.md Phase 2 fail-closed rule.
 ///
 /// `peer_capabilities` must be non-empty.
 pub fn select_conversation_mode(
@@ -68,9 +72,23 @@ pub fn select_conversation_mode(
         return Ok((target_mode, cs));
     }
 
-    // Phase 2 says PQ failures must not silently downgrade to classical, so
-    // return a NoCommonCiphersuite error at the target mode rather than
-    // walking down the modes.
+    // Within-PQ fallback: if the peer set is universally PQ-capable but
+    // they don't share a PqAuthenticity suite, drop to PqConfidentiality
+    // rather than failing the whole conversation. Crossing into Classical
+    // is still forbidden (Phase 2 fail-closed rule).
+    if target_mode == SecurityMode::PqAuthenticity {
+        if let Some(cs) =
+            SecurityMode::select_ciphersuite(peer_capabilities, SecurityMode::PqConfidentiality)
+        {
+            return Ok((SecurityMode::PqConfidentiality, cs));
+        }
+        // No PqConfidentiality suite either, but every peer is PQ-capable
+        // — never silently downgrade to Classical.
+        return Err(ConversationUpgradeError::NoCommonCiphersuite {
+            mode: SecurityMode::PqAuthenticity,
+        });
+    }
+
     Err(ConversationUpgradeError::NoCommonCiphersuite { mode: target_mode })
 }
 
@@ -165,17 +183,19 @@ mod tests {
     fn all_pq_auth_capable_falls_back_to_pq_confidentiality_without_auth_suites() {
         // Both peers advertise pq_auth_supported = true, but the only PQ
         // ciphersuite they have is X-Wing + Ed25519, which is
-        // PqConfidentiality. There's no PqAuthenticity ciphersuite available
-        // → select_mode returns PqAuthenticity, but select_ciphersuite
-        // can't find a PqAuthenticity suite. We fail closed at PqAuthenticity.
+        // PqConfidentiality. There's no PqAuthenticity ciphersuite
+        // available → select_mode returns PqAuthenticity, but
+        // select_ciphersuite can't find a PqAuthenticity suite. The
+        // within-PQ fallback then drops to PqConfidentiality (X-Wing) —
+        // crossing into Classical would be a silent downgrade and is
+        // still forbidden.
         let peers = [pq_auth_peer(), pq_auth_peer()];
         let refs: Vec<&DeviceCapability> = peers.iter().collect();
-        let result = select_conversation_mode(&refs);
+        let (mode, cs) = select_conversation_mode(&refs).expect("within-PQ fallback ok");
+        assert_eq!(mode, SecurityMode::PqConfidentiality);
         assert_eq!(
-            result,
-            Err(ConversationUpgradeError::NoCommonCiphersuite {
-                mode: SecurityMode::PqAuthenticity,
-            })
+            cs,
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
         );
     }
 

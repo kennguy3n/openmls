@@ -184,14 +184,18 @@ fn full_upgrade_path_classical_to_pq_authenticity_succeeds() {
     // Step 1: Classical → PqConfidentiality.
     validate_mode_change(&state, SecurityMode::PqConfidentiality)
         .expect("classical → confidentiality is an upgrade");
-    state.record_upgrade(SecurityMode::PqConfidentiality);
+    state
+        .record_upgrade(SecurityMode::PqConfidentiality)
+        .expect("classical → confidentiality recorded");
     assert_eq!(state.current_mode, SecurityMode::PqConfidentiality);
     assert_eq!(state.highest_mode_ever, SecurityMode::PqConfidentiality);
 
     // Step 2: PqConfidentiality → PqAuthenticity.
     validate_mode_change(&state, SecurityMode::PqAuthenticity)
         .expect("confidentiality → authenticity is an upgrade");
-    state.record_upgrade(SecurityMode::PqAuthenticity);
+    state
+        .record_upgrade(SecurityMode::PqAuthenticity)
+        .expect("confidentiality → authenticity recorded");
     assert_eq!(state.current_mode, SecurityMode::PqAuthenticity);
     assert_eq!(state.highest_mode_ever, SecurityMode::PqAuthenticity);
 

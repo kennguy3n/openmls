@@ -55,11 +55,25 @@ impl ConversationSecurityState {
 
     /// Apply a successful upgrade to `to`. Bumps `current_mode` and (if
     /// applicable) `highest_mode_ever`.
-    pub fn record_upgrade(&mut self, to: SecurityMode) {
+    ///
+    /// Rejects any `to < current_mode` with
+    /// [`DowngradeError::ModeDowngrade`] — the API is deliberately
+    /// non-permissive so a caller can't silently weaken a conversation by
+    /// invoking the "upgrade" path with a lower mode. Callers that
+    /// genuinely want to inspect whether a transition is legal first
+    /// should use [`validate_mode_change`].
+    pub fn record_upgrade(&mut self, to: SecurityMode) -> Result<(), DowngradeError> {
+        if to < self.current_mode {
+            return Err(DowngradeError::ModeDowngrade {
+                from: self.current_mode,
+                to,
+            });
+        }
         self.current_mode = to;
         if to > self.highest_mode_ever {
             self.highest_mode_ever = to;
         }
+        Ok(())
     }
 }
 
@@ -568,18 +582,38 @@ mod tests {
     #[test]
     fn record_upgrade_advances_state() {
         let mut state = confidentiality_state();
-        state.record_upgrade(SecurityMode::PqAuthenticity);
+        state
+            .record_upgrade(SecurityMode::PqAuthenticity)
+            .expect("upgrade ok");
         assert_eq!(state.current_mode, SecurityMode::PqAuthenticity);
         assert_eq!(state.highest_mode_ever, SecurityMode::PqAuthenticity);
     }
 
     #[test]
-    fn record_upgrade_does_not_lower_highest() {
-        let mut state = authenticity_state();
-        state.record_upgrade(SecurityMode::PqConfidentiality);
-        // current_mode reflects what record_upgrade recorded, but
-        // highest_mode_ever stays at the strongest seen.
+    fn record_upgrade_at_same_mode_is_ok() {
+        let mut state = confidentiality_state();
+        state
+            .record_upgrade(SecurityMode::PqConfidentiality)
+            .expect("same-mode no-op ok");
         assert_eq!(state.current_mode, SecurityMode::PqConfidentiality);
+        assert_eq!(state.highest_mode_ever, SecurityMode::PqConfidentiality);
+    }
+
+    #[test]
+    fn record_upgrade_rejects_downgrade() {
+        let mut state = authenticity_state();
+        let err = state
+            .record_upgrade(SecurityMode::PqConfidentiality)
+            .expect_err("downgrade must be rejected");
+        assert_eq!(
+            err,
+            DowngradeError::ModeDowngrade {
+                from: SecurityMode::PqAuthenticity,
+                to: SecurityMode::PqConfidentiality,
+            }
+        );
+        // State is unchanged after a rejected downgrade.
+        assert_eq!(state.current_mode, SecurityMode::PqAuthenticity);
         assert_eq!(state.highest_mode_ever, SecurityMode::PqAuthenticity);
     }
 }
