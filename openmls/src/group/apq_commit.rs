@@ -10,17 +10,18 @@
 //!   epoch.
 //! - **PARTIAL**: commit only on the T session. Used for routine PCS
 //!   refreshes and the like — only allowed when the conversation's
-//!   [`PqPolicy`] permits it for the given trigger.
+//!   [`PqPolicy`](crate::group::PqPolicy) permits it for the given trigger.
 //!
 //! ## Wiring
 //!
 //! [`prepare_full_commit`] and [`prepare_partial_commit`] now drive the
-//! underlying [`MlsGroup::commit_builder`] for both sessions:
+//! underlying [`MlsGroup::commit_builder`](crate::group::MlsGroup::commit_builder) for both sessions:
 //!
 //! 1. Run all preconditions, mode/policy/in-flight checks first; failures
 //!    short-circuit before we touch any group state.
 //! 2. For FULL: stage and merge the PQ commit so the new epoch's exporter
-//!    is available, derive `apq_psk` via [`MlsGroup::export_secret`] using
+//!    is available, derive `apq_psk` via
+//!    [`MlsGroup::export_secret`](crate::group::MlsGroup::export_secret) using
 //!    the [`APQ_PSK_LABEL`] domain separator, generate a fresh
 //!    [`PreSharedKeyId`] (random nonce + random ID), persist the PSK
 //!    bundle in the provider's storage, flip
@@ -30,7 +31,8 @@
 //!    untouched (no exporter call, no new PSK).
 //!
 //! Callers are responsible for delivering the resulting [`MlsMessageOut`]s
-//! to peers and merging the T pending commit ([`MlsGroup::merge_pending_commit`])
+//! to peers and merging the T pending commit
+//! ([`MlsGroup::merge_pending_commit`](crate::group::MlsGroup::merge_pending_commit))
 //! once delivery is acknowledged. The PQ commit is **already merged
 //! locally** when [`prepare_full_commit`] returns — that is required so the
 //! exporter can derive `apq_psk` from the new epoch — and the
@@ -50,7 +52,7 @@ use crate::schedule::psk::PreSharedKeyId;
 use crate::storage::OpenMlsProvider;
 
 /// Domain-separator label used when deriving `apq_psk` via
-/// [`MlsGroup::export_secret`] from the PQ session.
+/// [`MlsGroup::export_secret`](crate::group::MlsGroup::export_secret) from the PQ session.
 ///
 /// All clients in an APQ conversation must agree on this label byte-for-byte
 /// — it is part of the FULL commit choreography defined in
@@ -138,8 +140,10 @@ pub enum ApqCommitError {
 
     /// Building, validating, or staging the **PQ** commit failed.
     ///
-    /// The error string includes the underlying [`CreateCommitError`] /
-    /// [`CommitBuilderStageError`] description; we keep it as a string so
+    /// The error string includes the underlying
+    /// [`CreateCommitError`](crate::group::CreateCommitError) /
+    /// [`CommitBuilderStageError`](crate::group::CommitBuilderStageError)
+    /// description; we keep it as a string so
     /// [`ApqCommitError`] does not have to carry a generic
     /// `StorageError` parameter.
     #[error("PQ commit failed: {0}")]
@@ -153,7 +157,7 @@ pub enum ApqCommitError {
     PqMergeFailed(String),
 
     /// Deriving `apq_psk` from the PQ session via
-    /// [`MlsGroup::export_secret`] failed.
+    /// [`MlsGroup::export_secret`](crate::group::MlsGroup::export_secret) failed.
     #[error("PQ exporter derivation failed: {0}")]
     PqExportSecretFailed(String),
 
@@ -180,12 +184,12 @@ pub enum ApqCommitError {
 ///
 /// 1. Check that `conversation` is APQ (mode is non-classical AND both T and
 ///    PQ groups are present AND APQInfo is set).
-/// 2. Check that the active [`PqPolicy`] requires a FULL commit for
+/// 2. Check that the active [`PqPolicy`](crate::group::PqPolicy) requires a FULL commit for
 ///    `trigger` (i.e. `requires_full(trigger)`).
 /// 3. Check that no FULL commit handshake is already in flight.
 /// 4. Stage the PQ commit (with any caller-supplied `proposals`) and
 ///    merge it locally so the new epoch's exporter is available.
-/// 5. Derive `apq_psk` via [`MlsGroup::export_secret`] using
+/// 5. Derive `apq_psk` via [`MlsGroup::export_secret`](crate::group::MlsGroup::export_secret) using
 ///    [`APQ_PSK_LABEL`] and the conversation ID as context, store it in
 ///    the provider's PSK store, and flip
 ///    [`KChatMlsConversation::set_pending_full_commit`] to `true`.
@@ -333,7 +337,7 @@ where
 /// Steps performed:
 ///
 /// 1. Check that `conversation` has a T session.
-/// 2. Check that the active [`PqPolicy`] permits PARTIAL for `trigger`
+/// 2. Check that the active [`PqPolicy`](crate::group::PqPolicy) permits PARTIAL for `trigger`
 ///    (i.e. `allows_partial(trigger)`).
 /// 3. Check that no FULL commit handshake is already in flight (PARTIAL is
 ///    only safe when the two sessions are in sync).
@@ -462,7 +466,7 @@ where
 }
 
 /// Inspect `commit`'s proposals and return the [`CommitType`] required by
-/// the conversation's [`PqPolicy`].
+/// the conversation's [`PqPolicy`](crate::group::PqPolicy).
 ///
 /// Equivalent to:
 ///

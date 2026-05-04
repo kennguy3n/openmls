@@ -3,7 +3,7 @@
 //! KChat clients publish their signed [`DeviceCapability`] blobs to the
 //! server, fetch other devices' capabilities, and subscribe to capability
 //! changes for groups they care about. The
-//! [`CapabilityRegistry`](super::CapabilityRegistry) provides the
+//! [`CapabilityRegistry`] provides the
 //! in-memory storage for the **server side** of that exchange; this
 //! module defines the **wire format** that sits in front of it.
 //!
