@@ -78,6 +78,16 @@ pub enum ApqCommitError {
         /// The trigger the caller passed in.
         trigger: CommitTrigger,
     },
+    /// FULL commit attempted with a trigger the policy says only requires
+    /// PARTIAL. The caller should invoke [`prepare_partial_commit`]
+    /// instead.
+    #[error(
+        "trigger {trigger:?} only requires a PARTIAL commit under the active policy; use prepare_partial_commit instead"
+    )]
+    TriggerOnlyRequiresPartial {
+        /// The trigger the caller passed in.
+        trigger: CommitTrigger,
+    },
     /// FULL commit attempted with a trigger that is not a commit at all
     /// under the active policy (`CommitType::None` — e.g. a normal message).
     #[error("trigger {trigger:?} is a no-op (not a commit) under the active policy")]
@@ -137,16 +147,20 @@ pub fn prepare_full_commit<P, S>(
 
     match conversation.pq_policy().required_commit_type(trigger) {
         CommitType::Full => {}
-        CommitType::Partial => return Err(ApqCommitError::TriggerRequiresFull { trigger }),
+        CommitType::Partial => {
+            return Err(ApqCommitError::TriggerOnlyRequiresPartial { trigger });
+        }
         CommitType::None => return Err(ApqCommitError::TriggerIsNoCommit { trigger }),
     }
 
-    // Mark the FULL commit as in-flight so a concurrent attempt is rejected
-    // by the precondition above. The caller is expected to clear the flag
-    // via `record_full_commit` once both messages have been acknowledged by
-    // the delivery service.
-    conversation.set_pending_full_commit(true);
-
+    // Once the live MLS wiring lands, this is where the PQ commit gets sent
+    // and `conversation.set_pending_full_commit(true)` is called — i.e. the
+    // flag must only flip once a commit is actually in flight on the wire.
+    // Setting it before a guaranteed-failure return would leave the
+    // conversation permanently stuck (every subsequent `prepare_full_commit`
+    // / `prepare_partial_commit` would short-circuit with
+    // `FullCommitInFlight`), so the skeleton deliberately leaves the flag
+    // untouched.
     Err(ApqCommitError::NotImplemented)
 }
 
@@ -220,6 +234,26 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "trigger AddMember requires a FULL commit under the active policy"
+        );
+    }
+
+    #[test]
+    fn full_commit_error_on_partial_only_trigger_renders_clearly() {
+        let err = ApqCommitError::TriggerOnlyRequiresPartial {
+            trigger: CommitTrigger::PeriodicRefresh,
+        };
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("only requires a PARTIAL commit"),
+            "unexpected message: {rendered}"
+        );
+        assert!(
+            rendered.contains("prepare_partial_commit"),
+            "unexpected message: {rendered}"
+        );
+        assert!(
+            rendered.contains("PeriodicRefresh"),
+            "unexpected message: {rendered}"
         );
     }
 
