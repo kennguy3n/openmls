@@ -350,7 +350,10 @@ fn main() {
 /// Accepts both `--security-mode <mode>` (long form) and a bare
 /// trailing `<mode>` keyword as the second whitespace-separated
 /// token, so existing scripts that only pass a group name keep
-/// working (mode defaults to Classical in that case).
+/// working (mode defaults to Classical in that case). Multi-word
+/// group names where no token is a valid security-mode keyword are
+/// preserved verbatim — only the long `--security-mode` form is
+/// interpreted unconditionally.
 fn parse_create_group_args(rest: &str) -> (String, Result<conversation::CliSecurityMode, String>) {
     let trimmed = rest.trim();
     if let Some(idx) = trimmed.find("--security-mode") {
@@ -358,23 +361,37 @@ fn parse_create_group_args(rest: &str) -> (String, Result<conversation::CliSecur
         let mode_str = trimmed[idx + "--security-mode".len()..].trim();
         return (group_name, conversation::CliSecurityMode::parse(mode_str));
     }
-    let mut parts = trimmed.split_whitespace();
-    let name = parts.next().unwrap_or("").to_string();
-    let maybe_mode = parts.next();
-    let rest = parts.next();
-    if rest.is_some() {
-        // Two extra tokens — treat the whole tail as the group name to
-        // preserve the legacy "names with spaces" behaviour.
-        return (
-            trimmed.to_string(),
+
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => (String::new(), Ok(conversation::CliSecurityMode::Classical)),
+        [name] => (
+            (*name).to_string(),
             Ok(conversation::CliSecurityMode::Classical),
-        );
+        ),
+        [name, maybe_mode] => {
+            // Treat the second token as a security mode only if it
+            // actually parses as one. Otherwise fall back to the
+            // legacy "the entire tail is the group name" behaviour
+            // so two-word names like "MLS Discussions" keep working.
+            match conversation::CliSecurityMode::parse(maybe_mode) {
+                Ok(mode) => ((*name).to_string(), Ok(mode)),
+                Err(_) => (
+                    trimmed.to_string(),
+                    Ok(conversation::CliSecurityMode::Classical),
+                ),
+            }
+        }
+        _ => {
+            // Three or more whitespace-separated tokens — treat the
+            // whole tail as the group name to preserve the legacy
+            // "names with spaces" behaviour.
+            (
+                trimmed.to_string(),
+                Ok(conversation::CliSecurityMode::Classical),
+            )
+        }
     }
-    let mode = match maybe_mode {
-        Some(m) => conversation::CliSecurityMode::parse(m),
-        None => Ok(conversation::CliSecurityMode::Classical),
-    };
-    (name, mode)
 }
 
 /// Pretty-print a [`openmls::credentials::DeviceCapability`] for the
@@ -470,6 +487,16 @@ mod cli_tests {
         // name preserved.
         let (name, mode) = parse_create_group_args("MLS Discussions test");
         assert_eq!(name, "MLS Discussions test");
+        assert_eq!(mode.unwrap(), CliSecurityMode::Classical);
+    }
+
+    #[test]
+    fn parse_create_group_two_word_name_falls_back_to_classical() {
+        // Two whitespace-separated tokens where the second token is
+        // not a valid security mode keyword must be preserved as a
+        // single multi-word group name, not split into name+mode.
+        let (name, mode) = parse_create_group_args("MLS Discussions");
+        assert_eq!(name, "MLS Discussions");
         assert_eq!(mode.unwrap(), CliSecurityMode::Classical);
     }
 

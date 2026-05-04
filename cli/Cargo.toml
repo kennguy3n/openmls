@@ -34,3 +34,7 @@ branch = "windows-support"
 xwing = ["openmls/xwing", "openmls/libcrux-provider"]
 # Pull ML-DSA-65 (FIPS 204) signatures through the openmls crate.
 mldsa = ["openmls/mldsa", "openmls/libcrux-provider"]
+# Pull ML-DSA-44 (FIPS 204) signatures through the openmls crate.
+mldsa44 = ["openmls/mldsa44", "openmls/libcrux-provider"]
+# Pull ML-DSA-87 (FIPS 204) signatures through the openmls crate.
+mldsa87 = ["openmls/mldsa87", "openmls/libcrux-provider"]

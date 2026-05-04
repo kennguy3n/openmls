@@ -647,3 +647,91 @@ async fn apq_publish_to_unknown_recipient_is_not_found() {
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[actix_rt::test]
+async fn reset_clears_apq_queues() {
+    // Reproduces the regression where /reset cleared `clients` and
+    // `groups` but left orphaned APQ envelopes in `apq_queues`,
+    // potentially leaking stale messages to a re-registered client.
+    let data = web::Data::new(DsData::default());
+    let app = test::init_service(
+        App::new()
+            .app_data(data.clone())
+            .service(register_client)
+            .service(reset)
+            .service(apq_publish)
+            .service(apq_recv),
+    )
+    .await;
+
+    // Register a client and enqueue one APQ message addressed to it.
+    let client_name = "ApqClientResetCheck";
+    let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+    let crypto = &OpenMlsRustCrypto::default();
+    let (cred, signer) =
+        generate_credential(client_name.into(), SignatureScheme::from(ciphersuite));
+    let identity = cred.credential.serialized_content().to_vec();
+    let kp = generate_key_package(ciphersuite, cred, Extensions::empty(), crypto, &signer);
+    let key_packages = vec![(
+        kp.key_package()
+            .hash_ref(crypto.crypto())
+            .unwrap()
+            .as_slice()
+            .to_vec(),
+        KeyPackageIn::from(kp.clone()),
+    )];
+    let body = RegisterClientRequest {
+        key_packages: ClientKeyPackages(
+            key_packages
+                .into_iter()
+                .map(|(b, kp)| (b.into(), kp))
+                .collect::<Vec<(TlsByteVecU8, KeyPackageIn)>>()
+                .into(),
+        ),
+    };
+    let req = test::TestRequest::post()
+        .uri("/clients/register")
+        .set_payload(Bytes::copy_from_slice(
+            &body.tls_serialize_detached().unwrap(),
+        ))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
+    let publish = PublishApqMessageRequest {
+        message: ApqMessage::new_t(b"about-to-be-reset".to_vec()),
+        auth_token: ds_lib::messages::AuthToken::default(),
+    };
+    let mut payload = recipients.tls_serialize_detached().unwrap();
+    payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
+    let req = test::TestRequest::post()
+        .uri("/apq/publish")
+        .set_payload(Bytes::copy_from_slice(&payload))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Confirm the queue actually has one envelope before reset.
+    {
+        let queues = data.apq_queues.lock().unwrap();
+        assert_eq!(queues.get(&identity).map(|v| v.len()), Some(1));
+    }
+
+    // Reset.
+    let req = test::TestRequest::with_uri("/reset")
+        .insert_header(("reset-key", "poc-reset-password"))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // After reset all three maps must be empty.
+    {
+        let clients = data.clients.lock().unwrap();
+        let groups = data.groups.lock().unwrap();
+        let queues = data.apq_queues.lock().unwrap();
+        assert!(clients.is_empty(), "clients must be cleared");
+        assert!(groups.is_empty(), "groups must be cleared");
+        assert!(queues.is_empty(), "apq_queues must be cleared");
+    }
+}

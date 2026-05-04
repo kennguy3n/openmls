@@ -168,8 +168,10 @@ async fn reset(req: HttpRequest, data: web::Data<DsData>) -> impl Responder {
     log::debug!("Resetting server");
     let mut clients = unwrap_data!(data.clients.lock());
     let mut groups = unwrap_data!(data.groups.lock());
+    let mut apq_queues = unwrap_data!(data.apq_queues.lock());
     clients.clear();
     groups.clear();
+    apq_queues.clear();
     actix_web::HttpResponse::Ok().finish()
 }
 

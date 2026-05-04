@@ -255,7 +255,23 @@ and `messages` modules respectively.
   and `StorageMigrator` is the driver that runs each step
   check-before-write, persists progress between steps, and resumes
   cleanly from the marker on the next start. Concrete backends plug
-  in via the `MigrationStorage` trait.
+  in via the `MigrationStorage` trait. The canonical SQLite
+  implementation lives in
+  [`sqlite_storage::migration`](./sqlite_storage/src/migration.rs).
+- Reference Delivery Service APQ endpoints
+  ([`delivery-service/ds/src/main.rs`](./delivery-service/ds/src/main.rs))
+  — `POST /apq/publish`, `POST /apq/publish-pair`, and
+  `GET /apq/recv/{id}` route `ApqEnvelope` payloads to a per-client
+  in-memory queue for the actix-web reference DS binary.
+- CLI / WASM PQ surface — the `cli/` and `openmls-wasm/` crates now
+  expose `SecurityMode`, `DeviceCapability`, `select_conversation_mode`,
+  and the `LifecyclePhase` projection so end-to-end PQ flows can be
+  driven from the CLI and from the browser without going through
+  unstable internal types.
+- PQ benchmarks — [`openmls/benches/pq_benchmark.rs`](./openmls/benches/pq_benchmark.rs)
+  ships criterion benches for `DeviceCapability::sign` / `verify`,
+  `select_conversation_mode` at 10 / 100 / 1000 peers, `ApqInfo` TLS
+  round-trip, and the `ConversationSecurityState` validators.
 - [`group::apq_commit::auto_classify_commit_type`](./openmls/src/group/apq_commit.rs)
   — Phase 5 trigger auto-classification.
   `detect_external_join` / `detect_credential_rotation` walk a

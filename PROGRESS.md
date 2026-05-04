@@ -91,10 +91,13 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       `is_draft_codepoint()` and `is_post_quantum()` helpers; both providers
       explicitly reject them.
 - [x] Implement ML-DSA in at least one crypto provider — libcrux
-      provider gates ML-DSA-65 keygen / sign / verify behind a new
-      `mldsa` feature flag (surfaced as `openmls/mldsa`). RustCrypto
-      still rejects all three ML-DSA variants with
-      `UnsupportedSignatureScheme`.
+      provider implements ML-DSA-44 / ML-DSA-65 / ML-DSA-87 keygen /
+      sign / verify on top of `libcrux-ml-dsa`, gated behind the
+      independent `mldsa44` / `mldsa` / `mldsa87` feature flags
+      (surfaced as `openmls/mldsa44`, `openmls/mldsa`,
+      `openmls/mldsa87`). Each disabled feature returns
+      `UnsupportedSignatureScheme`. RustCrypto still rejects all three
+      ML-DSA variants with `UnsupportedSignatureScheme`.
 
 #### APQ-MLS combiner
 
@@ -249,10 +252,10 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 |--------------------------------------------------|-----------------------------------------------------------------------|
 | X-Wing only, draft codepoint `0x004D`            | Not sufficient for final standards-based deployment                   |
 | ~~RustCrypto provider panics on X-Wing~~         | Fixed: RustCrypto returns `UnsupportedCiphersuite` instead of panicking |
-| No ML-DSA signature support in any provider      | PQ confidentiality ≠ PQ authenticity (enum + helpers landed; no provider impl) |
+| ~~No ML-DSA signature support in any provider~~  | Fixed: libcrux provider implements ML-DSA-44 / ML-DSA-65 / ML-DSA-87 sign / verify / keygen behind the independent `mldsa44` / `mldsa` / `mldsa87` feature flags. RustCrypto still rejects all three. |
 | ~~No APQ-MLS combiner~~                          | Combiner scaffolding (FULL/PARTIAL commits, ApqInfo, bootstrap, ReInit, resync) is wired against `MlsGroup`; live multi-client soak tests still pending |
 | Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `DeliveryService`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage. Client side: SQLite `MigrationStorage` now exists in `sqlite_storage/src/migration.rs`. |
-| MLDSA44 / MLDSA87 not yet implemented            | libcrux provider exposes `mldsa44` and `mldsa87` feature flags with feature-gated stubs that return `UnsupportedSignatureScheme`; enabling each is a one-line change in `libcrux_crypto/src/crypto.rs` once libcrux upstream ships the parameter sets |
+| ~~MLDSA44 / MLDSA87 not yet implemented~~        | Fixed: libcrux provider implements ML-DSA-44 / ML-DSA-87 sign / verify / keygen on top of `libcrux-ml-dsa::ml_dsa_44` / `ml_dsa_87`, gated behind the independent `mldsa44` / `mldsa87` feature flags |
 | ~~`commit_reinit` seals the old group before `complete_reinit` can run~~ | Fixed: `commit_reinit` now derives the Resumption(ReInit) PSK before sealing the old group and stores it on `ReInitCommit`. `complete_reinit` consumes the pre-derived secret instead of calling `export_secret` on an inactive group |
 | ~~No migration state machine~~                   | Fixed: per-conversation `MigrationStateMachine` in `openmls/src/group/migration_state.rs` with the 8-state fine-grained lifecycle and the higher-level `ConversationLifecycle` projection wired into `KChatMlsConversation::migration_state` |
 | ~~No server-side capability protocol~~            | Fixed: wire types in `openmls/src/credentials/capability_protocol.rs` (publish / fetch / notification request-response messages with TLS codecs and signature verification, layered on top of the existing in-memory `CapabilityRegistry`) |
@@ -261,7 +264,7 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 ## Changelog
 
-### 2026-05-04 (PQ batch 6 — SQLite migration storage, CI, CLI/WASM PQ surface, MLDSA44/87 stubs, real-crypto e2e, DS APQ routing, benchmarks)
+### 2026-05-04 (PQ batch 6 — SQLite migration storage, CI, CLI/WASM PQ surface, MLDSA44/87, real-crypto e2e, DS APQ routing, benchmarks)
 
 - Implemented the `MigrationStorage` trait for the SQLite storage
   provider in `sqlite_storage/src/migration.rs`. Each migration step
@@ -297,15 +300,17 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
   and `SelectModeResult`. Added 6 host-side tests covering
   TLS round-trip, mode selection on classical-only / mixed peer
   sets, empty-peer rejection, and lifecycle projection.
-- Added MLDSA44 and MLDSA87 plumbing to the libcrux provider — new
-  `mldsa44` and `mldsa87` feature flags in `libcrux_crypto/Cargo.toml`
-  (passthrough from `openmls`); when disabled, the crypto provider
-  returns `UnsupportedSignatureScheme` for the corresponding scheme
-  and the test harness verifies that. When the feature is enabled,
-  the provider returns `UnsupportedSignatureScheme` with a message
-  pointing to the upstream libcrux gap, so flipping each on once
-  libcrux ships the parameter set is a one-line change. KAT vectors
-  in `openmls/tests/pq_kat_vectors/` cover MLDSA44/MLDSA65/MLDSA87.
+- Added full MLDSA44 and MLDSA87 implementations in the libcrux
+  provider — new `mldsa44` and `mldsa87` feature flags in
+  `libcrux_crypto/Cargo.toml` (passthrough from `openmls`), each
+  pulling in `libcrux-ml-dsa::ml_dsa_44` / `ml_dsa_87` and wiring
+  keygen / sign / verify with FIPS 204 fixed-size buffers. When the
+  feature is disabled, the provider returns
+  `UnsupportedSignatureScheme` for the corresponding scheme. New
+  feature-gated tests in `libcrux_crypto/src/crypto.rs` lock in
+  signing-key / verification-key / signature byte lengths plus
+  tampered-message rejection. KAT vectors in
+  `openmls/tests/pq_kat_vectors/` cover MLDSA44/MLDSA65/MLDSA87.
 - Added `openmls/tests/pq_real_crypto_e2e_tests.rs` (gated behind
   `#[cfg(feature = "xwing")]`) — full APQ bootstrap on top of a
   classical T group with an X-Wing PQ group under the libcrux

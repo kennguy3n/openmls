@@ -324,11 +324,40 @@ anti-downgrade state); `StorageMigrationState` is the persisted
 progress marker; `StorageMigrator::run_migration` runs each step
 check-before-write, persists progress between steps, and resumes
 cleanly from the marker on the next start. Concrete backends
-(SQLite, Sled, etc.) plug in via the `MigrationStorage` trait. This
-is the canonical implementation of the "storage migration must be
-idempotent so that a client can be upgraded, crash mid-migration, and
-re-run the migration safely on next start" requirement and is a
-prerequisite for the PQ-version storage gate below.
+(SQLite, Sled, etc.) plug in via the `MigrationStorage` trait. The
+canonical SQLite implementation lives in
+[`sqlite_storage/src/migration.rs`](./sqlite_storage/src/migration.rs);
+each step idempotently creates the underlying table (`apq_info`,
+`conversation_mapping`, `psk_material`, `commit_counters`,
+`anti_downgrade_state`), `read_state` / `persist_state` round-trip
+through a `migration_state` row, and the `*_present` validators back
+`validate_post_migration`. This is the canonical implementation of
+the "storage migration must be idempotent so that a client can be
+upgraded, crash mid-migration, and re-run the migration safely on
+next start" requirement and is a prerequisite for the PQ-version
+storage gate below.
+
+**Reference DS APQ message routing.** The reference Delivery Service
+in [`delivery-service/ds/src/main.rs`](./delivery-service/ds/src/main.rs)
+exposes three actix-web endpoints: `POST /apq/publish` (single
+`ApqMessage`), `POST /apq/publish-pair` (FULL-commit pair), and
+`GET /apq/recv/{id}` (drains the per-client queue). Wire types are
+re-exported from
+[`delivery-service/ds-lib/src/apq.rs`](./delivery-service/ds-lib/src/apq.rs).
+The endpoints validate that each recipient is a registered client
+before enqueueing and the `/reset` admin endpoint clears the APQ
+queue alongside the client and group maps.
+
+**MLDSA44 / MLDSA65 / MLDSA87.** The libcrux provider implements all
+three FIPS 204 parameter sets on top of `libcrux-ml-dsa`, gated
+behind the independent `mldsa44` / `mldsa` (ML-DSA-65) / `mldsa87`
+feature flags (passthrough from the `openmls` crate). When a feature
+is disabled, the provider returns `UnsupportedSignatureScheme` for
+the corresponding scheme. Provider behaviour is locked in by
+feature-gated tests in `libcrux_crypto/src/crypto.rs` (signing key
+/ verification key / signature byte-length pinning + tampered
+message rejection), and KAT vectors in
+`openmls/tests/pq_kat_vectors/` cover all three parameter sets.
 
 ## Rollout Gates
 
