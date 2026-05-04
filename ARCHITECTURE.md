@@ -239,6 +239,11 @@ The orchestration layer is implemented as the following modules in the
 | `bootstrap_apq`                            | `openmls/src/group/kchat_conversation.rs`                | Phase 4 APQ bootstrap: links a PQ group to an existing T group and emits an `ApqWelcome`. |
 | `propose_reinit` / `commit_reinit` / `complete_reinit` | `openmls/src/group/reinit_upgrade.rs`        | Phase 3 ReInit upgrade path; derives the Resumption(ReInit) PSK via the MLS exporter. |
 | `detect_desync` / `resync_from_pq` / `resync_from_t` / `force_resync` | `openmls/src/group/apq_resync.rs` | Recovery when a client misses one half of a FULL commit pair (`MAX_EPOCH_DRIFT = 1`). |
+| `CapabilityRegistry`                       | `openmls/src/credentials/capability_registry.rs`         | Phase 0 server-side capability store: in-memory, signed-blob verification on `store`. |
+| `KeyPackageService`                        | `openmls/src/key_packages/key_package_service.rs`        | Phase 1 server-side per-ciphersuite KP store with one-time consumption + last-resort. |
+| `ConversationMetadataService`              | `openmls/src/group/conversation_metadata.rs`             | Phase 4 conversation security state tracking, gated by no-downgrade validators.       |
+| `KeyPackageFetchRateLimiter`               | `openmls/src/key_packages/rate_limiter.rs`               | Phase 1 sliding-window rate limiter for PQ KeyPackage fetches.                        |
+| `PqTelemetryEvent` / `PqTelemetryEmitter`  | `openmls/src/group/pq_telemetry.rs`                      | Cross-phase telemetry: 8-variant event enum + `NoOp` and `InMemory` emitters.         |
 
 FULL and PARTIAL commits are wired through `MlsGroup::commit_builder`:
 `prepare_full_commit` runs the PQ commit first, derives `apq_psk` via

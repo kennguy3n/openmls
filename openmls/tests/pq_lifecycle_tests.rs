@@ -29,16 +29,19 @@
 //! would.
 
 use openmls::ciphersuite::SecurityMode;
-use openmls::credentials::DeviceCapability;
+use openmls::credentials::{BasicCredential, CredentialWithKey, DeviceCapability};
 use openmls::extensions::apq_info::ApqInfo;
 use openmls::group::apq_resync::DesyncStatus;
 use openmls::group::conversation_upgrade::select_conversation_mode;
+use openmls::group::kchat_conversation::{KChatConversationError, KChatMlsConversation};
 use openmls::group::no_downgrade::{
     validate_apq_info_change, validate_joiner_key_package, DowngradeError,
 };
 use openmls::group::pq_policy::{CommitTrigger, CommitType, PqPolicy};
-use openmls::group::GroupId;
-use openmls_traits::types::Ciphersuite;
+use openmls::group::{GroupId, MlsGroup, MlsGroupCreateConfig};
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::types::{Ciphersuite, SignatureScheme};
 
 fn classical_cs() -> Ciphersuite {
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
@@ -336,4 +339,296 @@ fn full_lifecycle_step_by_step_assertions_in_one_run() {
     let mut tampered = info.clone();
     tampered.mode = SecurityMode::Classical;
     assert!(validate_apq_info_change(Some(&info), Some(&tampered)).is_err());
+}
+
+// =============================================================================
+// KChatMlsConversation integration tests with real MlsGroups.
+//
+// These tests construct actual `MlsGroup` instances via the RustCrypto
+// provider and pass them into the `KChatMlsConversation` constructors so
+// the constructor invariants are exercised end-to-end. The unit tests in
+// `kchat_conversation.rs` only check the error paths without spinning up
+// real groups; this layer pins down the happy paths and the accessors.
+// =============================================================================
+
+fn make_signer(scheme: SignatureScheme) -> SignatureKeyPair {
+    SignatureKeyPair::new(scheme).expect("signature keypair generation")
+}
+
+fn make_credential(name: &str, signer: &SignatureKeyPair) -> CredentialWithKey {
+    CredentialWithKey {
+        credential: BasicCredential::new(name.as_bytes().to_vec()).into(),
+        signature_key: signer.public().into(),
+    }
+}
+
+fn make_classical_group(
+    provider: &OpenMlsRustCrypto,
+    signer: &SignatureKeyPair,
+    name: &str,
+) -> MlsGroup {
+    let credential = make_credential(name, signer);
+    MlsGroup::new(
+        provider,
+        signer,
+        &MlsGroupCreateConfig::default(),
+        credential,
+    )
+    .expect("classical group creation")
+}
+
+#[test]
+fn new_classical_with_real_group_exposes_accessors() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let group = make_classical_group(&provider, &signer, "alice");
+    let group_id = group.group_id().clone();
+    let group_cs = group.ciphersuite();
+
+    let convo =
+        KChatMlsConversation::new_classical(b"conv-1".to_vec(), group).expect("classical convo");
+
+    // Mode + classical/apq classifications.
+    assert_eq!(convo.mode(), SecurityMode::Classical);
+    assert!(convo.is_classical());
+    assert!(!convo.is_pq());
+    assert!(!convo.is_apq());
+
+    // Accessors line up with the underlying MlsGroup.
+    let t = convo.t_group().expect("t_group present");
+    assert_eq!(t.group_id(), &group_id);
+    assert_eq!(t.ciphersuite(), group_cs);
+    assert!(t.is_active());
+    assert_eq!(t.epoch().as_u64(), 0);
+
+    // No PQ session and no APQInfo on a Classical conversation.
+    assert!(convo.pq_group().is_none());
+    assert!(convo.apq_info().is_none());
+
+    // Pending-FULL-commit defaults.
+    assert!(!convo.pending_full_commit());
+    assert_eq!(convo.last_full_commit_epoch(), 0);
+    assert_eq!(convo.pq_policy(), PqPolicy::Classical);
+    assert_eq!(convo.conversation_id(), b"conv-1");
+}
+
+#[test]
+fn new_apq_with_two_real_groups_reports_is_apq_true() {
+    // Even though both underlying groups are *classical* MLS groups,
+    // the orchestration constructor accepts them as long as the
+    // supplied APQInfo is mode-consistent. The constructor does not
+    // validate the underlying group ciphersuites against APQInfo —
+    // that is left to the bootstrap path. This test pins the
+    // constructor's actual behavior.
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let t_group = make_classical_group(&provider, &signer, "alice-t");
+    let pq_group = make_classical_group(&provider, &signer, "alice-pq");
+
+    let info = ApqInfo::new(
+        GroupId::from_slice(&[0xAA; 16]),
+        GroupId::from_slice(&[0xBB; 16]),
+        0,
+        0,
+        classical_cs(),
+        xwing_cs(),
+        SecurityMode::PqConfidentiality,
+    );
+
+    let convo = KChatMlsConversation::new_apq(
+        b"conv-apq".to_vec(),
+        SecurityMode::PqConfidentiality,
+        t_group,
+        pq_group,
+        info.clone(),
+        PqPolicy::PqConfidentiality,
+    )
+    .expect("apq convo");
+
+    assert!(convo.is_apq());
+    assert!(convo.is_pq());
+    assert!(!convo.is_classical());
+    assert_eq!(convo.mode(), SecurityMode::PqConfidentiality);
+    assert_eq!(convo.pq_policy(), PqPolicy::PqConfidentiality);
+    assert_eq!(convo.apq_info(), Some(&info));
+    assert!(convo.t_group().is_some());
+    assert!(convo.pq_group().is_some());
+    // The two MlsGroups must remain distinct objects (different
+    // memory) so callers can't mistake one for the other.
+    let t_id = convo.t_group().unwrap().group_id().clone();
+    let pq_id = convo.pq_group().unwrap().group_id().clone();
+    assert_ne!(t_id, pq_id);
+}
+
+#[test]
+fn new_direct_pq_rejects_classical_mode_with_real_group() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let group = make_classical_group(&provider, &signer, "alice");
+
+    let err = KChatMlsConversation::new_direct_pq(
+        b"conv-direct".to_vec(),
+        SecurityMode::Classical,
+        group,
+        PqPolicy::Classical,
+    )
+    .expect_err("direct-pq must reject Classical mode");
+
+    assert!(matches!(
+        err,
+        KChatConversationError::DirectPqWithClassicalMode {
+            got: SecurityMode::Classical
+        }
+    ));
+}
+
+#[test]
+fn new_direct_pq_with_pq_mode_real_group_succeeds() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let group = make_classical_group(&provider, &signer, "alice");
+
+    let convo = KChatMlsConversation::new_direct_pq(
+        b"conv-direct".to_vec(),
+        SecurityMode::PqConfidentiality,
+        group,
+        PqPolicy::PqConfidentiality,
+    )
+    .expect("direct-pq with pq mode");
+
+    assert_eq!(convo.mode(), SecurityMode::PqConfidentiality);
+    assert!(convo.is_pq());
+    // DIRECT_PQ stores the sole session under t_group; pq_group is
+    // unused, and the conversation is NOT considered APQ.
+    assert!(convo.t_group().is_some());
+    assert!(convo.pq_group().is_none());
+    assert!(convo.apq_info().is_none());
+    assert!(!convo.is_apq());
+}
+
+#[test]
+fn new_apq_rejects_mismatched_apq_info_mode() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let t_group = make_classical_group(&provider, &signer, "alice-t");
+    let pq_group = make_classical_group(&provider, &signer, "alice-pq");
+
+    // Conversation says PqAuthenticity but the APQInfo says
+    // PqConfidentiality — must be rejected.
+    let info = ApqInfo::new(
+        GroupId::from_slice(&[0xAA; 16]),
+        GroupId::from_slice(&[0xBB; 16]),
+        0,
+        0,
+        classical_cs(),
+        xwing_cs(),
+        SecurityMode::PqConfidentiality,
+    );
+
+    let err = KChatMlsConversation::new_apq(
+        b"conv-apq".to_vec(),
+        SecurityMode::PqAuthenticity,
+        t_group,
+        pq_group,
+        info,
+        PqPolicy::PqRequired,
+    )
+    .expect_err("mode mismatch must fail");
+
+    assert!(matches!(
+        err,
+        KChatConversationError::ApqInfoModeMismatch {
+            expected: SecurityMode::PqAuthenticity,
+            got: SecurityMode::PqConfidentiality,
+        }
+    ));
+}
+
+#[test]
+fn new_apq_with_classical_mode_real_groups_rejected() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let t_group = make_classical_group(&provider, &signer, "alice-t");
+    let pq_group = make_classical_group(&provider, &signer, "alice-pq");
+
+    // Build any ApqInfo here — the mode check fires first so the
+    // info contents are irrelevant.
+    let info = ApqInfo::new(
+        GroupId::from_slice(&[0xAA; 16]),
+        GroupId::from_slice(&[0xBB; 16]),
+        0,
+        0,
+        classical_cs(),
+        xwing_cs(),
+        SecurityMode::PqConfidentiality,
+    );
+
+    let err = KChatMlsConversation::new_apq(
+        b"conv-apq".to_vec(),
+        SecurityMode::Classical,
+        t_group,
+        pq_group,
+        info,
+        PqPolicy::Classical,
+    )
+    .expect_err("APQ with Classical mode must fail");
+
+    assert!(matches!(
+        err,
+        KChatConversationError::ApqWithClassicalMode {
+            got: SecurityMode::Classical
+        }
+    ));
+}
+
+#[test]
+fn new_apq_propagates_invalid_apq_info_validation_error() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let t_group = make_classical_group(&provider, &signer, "alice-t");
+    let pq_group = make_classical_group(&provider, &signer, "alice-pq");
+
+    // Build an ApqInfo with t_group_id == pq_group_id — fails
+    // ApqInfo::validate.
+    let same_id = GroupId::from_slice(&[0xAA; 16]);
+    let info = ApqInfo::new(
+        same_id.clone(),
+        same_id,
+        0,
+        0,
+        classical_cs(),
+        xwing_cs(),
+        SecurityMode::PqConfidentiality,
+    );
+
+    let err = KChatMlsConversation::new_apq(
+        b"conv-apq".to_vec(),
+        SecurityMode::PqConfidentiality,
+        t_group,
+        pq_group,
+        info,
+        PqPolicy::PqConfidentiality,
+    )
+    .expect_err("invalid apq_info must propagate as InvalidApqInfo");
+
+    assert!(matches!(err, KChatConversationError::InvalidApqInfo(_)));
+}
+
+#[test]
+fn classical_conversation_pending_full_commit_can_be_toggled() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = make_signer(classical_cs().signature_algorithm());
+    let group = make_classical_group(&provider, &signer, "alice");
+
+    let mut convo =
+        KChatMlsConversation::new_classical(b"conv-toggle".to_vec(), group).expect("classical");
+
+    assert!(!convo.pending_full_commit());
+    convo.set_pending_full_commit(true);
+    assert!(convo.pending_full_commit());
+
+    convo.record_full_commit(7);
+    assert_eq!(convo.last_full_commit_epoch(), 7);
+    // record_full_commit clears the pending flag.
+    assert!(!convo.pending_full_commit());
 }

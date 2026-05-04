@@ -43,9 +43,11 @@ use errors::*;
 use crate::group::MlsGroup;
 
 // Public
+pub mod capability_registry;
 pub mod device_capability;
 pub mod errors;
 
+pub use capability_registry::{CapabilityRegistry, RegistryError};
 pub use device_capability::DeviceCapability;
 
 /// CredentialType.

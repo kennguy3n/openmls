@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~30%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~55%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
@@ -221,14 +221,20 @@ The server side is **policy-aware but cipher-agnostic**: it never sees plaintext
 and never sees secret PQ material, but it does need to understand which
 ciphersuite/capability each device speaks and how to fan out APQ traffic.
 
-| Component              | Change                                                                                  |
-|------------------------|-----------------------------------------------------------------------------------------|
-| KeyPackage service     | Store/fetch per ciphersuite and capability version                                      |
-| Capability registry    | Signed per-device PQ capability                                                         |
-| Delivery service       | APQ wrapper messages, preserve commit ordering                                          |
-| Group metadata         | Track conversation security state (not secrets)                                         |
-| Abuse/rate limit       | Rate-limit PQ KeyPackage fetches and Welcome fanout                                     |
-| Telemetry              | Track failures, unsupported suites, rejections, exhaustion (no plaintext)               |
+| Component              | Change                                                                                  | Reference impl                                                                |
+|------------------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| KeyPackage service     | Store/fetch per ciphersuite and capability version, last-resort fallback                | `openmls/src/key_packages/key_package_service.rs` (`KeyPackageService`)        |
+| Capability registry    | Signed per-device PQ capability                                                         | `openmls/src/credentials/capability_registry.rs` (`CapabilityRegistry`)        |
+| Delivery service       | APQ wrapper messages, preserve commit ordering                                          | (out of scope for this repo — lives in the KChat server)                      |
+| Group metadata         | Track conversation security state (not secrets), enforce no-downgrade                   | `openmls/src/group/conversation_metadata.rs` (`ConversationMetadataService`)   |
+| Abuse/rate limit       | Rate-limit PQ KeyPackage fetches and Welcome fanout                                     | `openmls/src/key_packages/rate_limiter.rs` (`KeyPackageFetchRateLimiter`)      |
+| Telemetry              | Track failures, unsupported suites, rejections, exhaustion (no plaintext)               | `openmls/src/group/pq_telemetry.rs` (`PqTelemetryEvent`, `PqTelemetryEmitter`) |
+
+All five reference implementations are **in-memory**. They define the
+API contract a production server is expected to honour and let tests
+drive end-to-end flows without standing up a real backend; production
+servers must back them with persistent storage and the appropriate
+authentication / authorization shim.
 
 ## Rollout Gates
 

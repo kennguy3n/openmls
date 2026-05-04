@@ -23,10 +23,12 @@ pub(crate) mod public_group;
 // Public — KChat orchestration layer
 pub mod apq_commit;
 pub mod apq_resync;
+pub mod conversation_metadata;
 pub mod conversation_upgrade;
 pub mod kchat_conversation;
 pub mod no_downgrade;
 pub mod pq_policy;
+pub mod pq_telemetry;
 pub mod reinit_upgrade;
 
 // Public
@@ -52,6 +54,7 @@ pub use apq_resync::{
     detect_desync, force_resync, resync_from_pq, resync_from_t, ApqResyncError, DesyncReport,
     DesyncStatus, ResyncResult, MAX_EPOCH_DRIFT,
 };
+pub use conversation_metadata::{ConversationMetadata, ConversationMetadataService, MetadataError};
 pub use conversation_upgrade::{select_conversation_mode, ConversationUpgradeError};
 pub use kchat_conversation::{ApqBootstrapError, KChatConversationError, KChatMlsConversation};
 pub use no_downgrade::{
@@ -59,6 +62,9 @@ pub use no_downgrade::{
     validate_joiner_key_package, validate_mode_change, ConversationSecurityState, DowngradeError,
 };
 pub use pq_policy::{CommitTrigger, CommitType, PqPolicy};
+pub use pq_telemetry::{
+    InMemoryTelemetryEmitter, NoOpTelemetryEmitter, PqTelemetryEmitter, PqTelemetryEvent,
+};
 pub use reinit_upgrade::{
     commit_reinit, complete_reinit, propose_reinit, ReInitCommit, ReInitError, ReInitPlan,
     ReInitResumption,
