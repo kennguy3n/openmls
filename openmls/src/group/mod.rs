@@ -60,7 +60,9 @@ pub use conversation_upgrade::{
     select_conversation_mode, select_conversation_mode_with_emitter, ConversationUpgradeError,
 };
 pub use kchat_conversation::{ApqBootstrapError, KChatConversationError, KChatMlsConversation};
-pub use migration_state::{MigrationError, MigrationEvent, MigrationState, MigrationStateMachine};
+pub use migration_state::{
+    ConversationLifecycle, MigrationError, MigrationEvent, MigrationState, MigrationStateMachine,
+};
 pub use no_downgrade::{
     validate_apq_info_change, validate_ciphersuite_pin, validate_epoch_consistency,
     validate_joiner_key_package, validate_mode_change, validate_mode_change_with_emitter,

@@ -27,6 +27,7 @@ use crate::ciphersuite::SecurityMode;
 use crate::extensions::apq_info::{ApqInfo, ApqInfoError};
 use crate::framing::{MlsMessageBodyOut, MlsMessageOut};
 use crate::group::apq_commit::{APQ_PSK_ID_LENGTH, APQ_PSK_LABEL, APQ_PSK_LENGTH};
+use crate::group::migration_state::{ConversationLifecycle, MigrationStateMachine};
 use crate::group::mls_group::MlsGroup;
 use crate::group::pq_policy::PqPolicy;
 use crate::group::pq_telemetry::{NoOpTelemetryEmitter, PqTelemetryEmitter};
@@ -63,6 +64,12 @@ pub struct KChatMlsConversation {
     /// Replace with [`Self::set_telemetry_emitter`] when wiring an
     /// observability backend.
     telemetry: Arc<dyn PqTelemetryEmitter>,
+    /// Optional migration state machine — only set when the
+    /// conversation has been opted into the migration tracker.
+    /// `None` means the conversation has never been observed by the
+    /// migration tracker (Classical conversations are typically left
+    /// in `None` until an upgrade is initiated).
+    migration_state: Option<MigrationStateMachine>,
 }
 
 impl std::fmt::Debug for KChatMlsConversation {
@@ -76,6 +83,7 @@ impl std::fmt::Debug for KChatMlsConversation {
             .field("pending_full_commit", &self.pending_full_commit)
             .field("last_full_commit_epoch", &self.last_full_commit_epoch)
             .field("pq_policy", &self.pq_policy)
+            .field("migration_state", &self.migration_state)
             .finish_non_exhaustive()
     }
 }
@@ -129,6 +137,7 @@ impl KChatMlsConversation {
             last_full_commit_epoch: 0,
             pq_policy: PqPolicy::Classical,
             telemetry: Arc::new(NoOpTelemetryEmitter),
+            migration_state: None,
         })
     }
 
@@ -157,6 +166,7 @@ impl KChatMlsConversation {
             last_full_commit_epoch: 0,
             pq_policy: policy,
             telemetry: Arc::new(NoOpTelemetryEmitter),
+            migration_state: None,
         })
     }
 
@@ -193,6 +203,7 @@ impl KChatMlsConversation {
             last_full_commit_epoch: 0,
             pq_policy: policy,
             telemetry: Arc::new(NoOpTelemetryEmitter),
+            migration_state: None,
         })
     }
 
@@ -209,6 +220,39 @@ impl KChatMlsConversation {
     /// [`PqTelemetryEmitter`].
     pub fn telemetry_emitter(&self) -> &Arc<dyn PqTelemetryEmitter> {
         &self.telemetry
+    }
+
+    /// Reference to the optional [`MigrationStateMachine`] tracking
+    /// this conversation's upgrade lifecycle. `None` means migration
+    /// tracking has not been opted into yet — call
+    /// [`Self::set_migration_state`] to install one.
+    pub fn migration_state(&self) -> Option<&MigrationStateMachine> {
+        self.migration_state.as_ref()
+    }
+
+    /// Mutable reference to the optional [`MigrationStateMachine`].
+    ///
+    /// Used by orchestration code that drives the machine forward via
+    /// [`MigrationStateMachine::advance`] / `advance_at`.
+    pub fn migration_state_mut(&mut self) -> Option<&mut MigrationStateMachine> {
+        self.migration_state.as_mut()
+    }
+
+    /// Install or replace the [`MigrationStateMachine`] for this
+    /// conversation. Pass [`None`] to clear it.
+    pub fn set_migration_state(&mut self, machine: Option<MigrationStateMachine>) {
+        self.migration_state = machine;
+    }
+
+    /// Project the optional [`MigrationStateMachine`] onto a
+    /// [`ConversationLifecycle`] phase. Returns
+    /// [`ConversationLifecycle::Classical`] when no machine has been
+    /// installed yet.
+    pub fn lifecycle(&self) -> ConversationLifecycle {
+        match self.migration_state.as_ref() {
+            Some(sm) => ConversationLifecycle::from_state_machine(sm),
+            None => ConversationLifecycle::Classical,
+        }
     }
 
     /// The opaque application-level conversation identifier (KChat
