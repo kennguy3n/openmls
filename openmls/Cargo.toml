@@ -67,6 +67,13 @@ libcrux-provider = [
 # Requires `libcrux-provider`. The codepoint `0x004D` is a draft and will
 # change once IANA assigns a final value, so this feature is opt-in.
 xwing = ["libcrux-provider", "openmls_libcrux_crypto?/xwing"]
+# Enable ML-DSA-65 (FIPS 204) signatures via the libcrux provider.
+# Requires `libcrux-provider`; the RustCrypto provider ignores this
+# feature and continues to reject every ML-DSA scheme. Gated because
+# the codepoint (`0x0905`) is still in the IETF draft / private-use
+# range and ML-DSA keys/signatures are materially larger than
+# classical Ed25519.
+mldsa = ["libcrux-provider", "openmls_libcrux_crypto?/mldsa"]
 sqlite-provider = [
     "dep:openmls_sqlite_storage",
     "openmls_test?/sqlite-provider",

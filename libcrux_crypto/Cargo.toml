@@ -15,6 +15,7 @@ libcrux-ed25519 = { version = "0.0.7", features = ["rand"] }
 libcrux-hkdf = { version = "0.0.6" }
 libcrux-sha2 = { version = "0.0.6" }
 libcrux-hmac = { version = "0.0.6" }
+libcrux-ml-dsa = { version = "0.0.8", optional = true }
 libcrux-traits = { version = "0.0.6" }
 
 openmls_traits = { workspace = true }
@@ -37,6 +38,19 @@ hpke-rs-libcrux = { version = "0.6.1" }
 # explicit feature flag to make sure it cannot be selected accidentally in
 # production builds.
 xwing = []
+
+# Enable the ML-DSA-65 signature scheme (FIPS 204) in this provider.
+#
+# `SignatureScheme::MLDSA65` (codepoint `0x0905`, draft) is gated behind
+# this feature flag because the codepoint itself is in the IETF draft /
+# private-use range and the runtime size of ML-DSA-65 keys and signatures
+# is materially larger than classical Ed25519 (1952-byte verification key,
+# 4032-byte signing key, 3309-byte signature). Builds that do not set
+# `mldsa` continue to reject ML-DSA in `signature_key_gen` / `sign` /
+# `verify_signature` with `UnsupportedSignatureScheme`, exactly like the
+# RustCrypto provider.
+mldsa = ["dep:libcrux-ml-dsa"]
+
 extensions-draft-08 = [
     "openmls_traits/extensions-draft-08",
     "openmls_memory_storage/extensions-draft-08",
