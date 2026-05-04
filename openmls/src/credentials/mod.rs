@@ -43,10 +43,17 @@ use errors::*;
 use crate::group::MlsGroup;
 
 // Public
+pub mod capability_protocol;
 pub mod capability_registry;
 pub mod device_capability;
 pub mod errors;
 
+pub use capability_protocol::{
+    build_update_notification, process_fetch, process_publish, CapabilityFetchKey,
+    CapabilityFetchRequest, CapabilityFetchResponse, CapabilityPublishRequest,
+    CapabilityPublishResponse, CapabilityUpdateNotification, CapabilityVersion, FetchedCapability,
+    ProtocolError,
+};
 pub use capability_registry::{CapabilityRegistry, RegistryError};
 pub use device_capability::DeviceCapability;
 

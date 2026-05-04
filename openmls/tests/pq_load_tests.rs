@@ -257,6 +257,202 @@ fn smoke_no_hang_on_repeated_publish_fetch_cycles() {
     assert_eq!(svc.total_len(), 0, "all standard KPs consumed");
 }
 
+// =============================================================================
+// High-scale `#[ignore]`d load tests (Task 5).
+//
+// These probe the in-memory `KeyPackageService` and
+// `KeyPackageFetchRateLimiter` at the scale called out in Phase 1 of
+// the migration plan: 10K+ KeyPackages across ~1K simulated devices.
+// They are gated behind `#[ignore]` so normal CI doesn't pay the
+// build-time cost of generating that many keypairs; run them with
+// `cargo test -p openmls --test pq_load_tests -- --ignored`.
+//
+// Each test prints throughput / timing metrics to stdout via
+// `eprintln!` so a human running the suite can spot regressions.
+// =============================================================================
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_publish_ten_thousand_kps_across_a_thousand_devices() {
+    use std::time::Instant;
+    let provider = OpenMlsRustCrypto::default();
+    let mut svc = KeyPackageService::new();
+
+    const NUM_DEVICES: usize = 1_000;
+    // Cap is `MAX_KEY_PACKAGES_PER_DEVICE`; we publish 10/device =
+    // 10_000 KPs total.
+    const KPS_PER_DEVICE: usize = 10;
+
+    let user_id = b"loadtest-user".to_vec();
+    let publish_start = Instant::now();
+    for d in 0..NUM_DEVICES {
+        let device_id = format!("dev-{d:05}").into_bytes();
+        for _ in 0..KPS_PER_DEVICE {
+            let e = entry(&provider, "loadtest", 1_000_000, false);
+            svc.publish(user_id.clone(), device_id.clone(), e)
+                .expect("publish");
+        }
+    }
+    let publish_elapsed = publish_start.elapsed();
+    let total = NUM_DEVICES * KPS_PER_DEVICE;
+    eprintln!(
+        "publish phase: {total} KPs across {NUM_DEVICES} devices in {:?} ({:.0} KP/s)",
+        publish_elapsed,
+        total as f64 / publish_elapsed.as_secs_f64()
+    );
+    assert_eq!(svc.total_len(), total);
+
+    // Fetch every KP back; one-time consumption means every fetch
+    // succeeds exactly once.
+    let fetch_start = Instant::now();
+    for d in 0..NUM_DEVICES {
+        let device_id = format!("dev-{d:05}").into_bytes();
+        for _ in 0..KPS_PER_DEVICE {
+            let _ = svc.fetch(&user_id, &device_id, CS).expect("fetch");
+        }
+    }
+    let fetch_elapsed = fetch_start.elapsed();
+    eprintln!(
+        "fetch phase: {total} KPs in {:?} ({:.0} KP/s)",
+        fetch_elapsed,
+        total as f64 / fetch_elapsed.as_secs_f64()
+    );
+    assert_eq!(
+        svc.total_len(),
+        0,
+        "every standard KP must be consumed at one-time-fetch"
+    );
+}
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_expire_before_bulk_purge_at_scale() {
+    use std::time::Instant;
+    let provider = OpenMlsRustCrypto::default();
+    let mut svc = KeyPackageService::new();
+
+    const NUM_DEVICES: usize = 500;
+    const KPS_PER_DEVICE: usize = 8;
+
+    // Publish half with old expiry, half with future expiry.
+    let user_id = b"expiry-user".to_vec();
+    for d in 0..NUM_DEVICES {
+        let device_id = format!("dev-{d:05}").into_bytes();
+        for i in 0..KPS_PER_DEVICE {
+            // Even-indexed KPs expire at t=1000, odd-indexed at t=999_999.
+            let expiry = if i.is_multiple_of(2) { 1_000 } else { 999_999 };
+            let e = entry(&provider, "expiry", expiry, false);
+            svc.publish(user_id.clone(), device_id.clone(), e)
+                .expect("publish");
+        }
+    }
+    let total = NUM_DEVICES * KPS_PER_DEVICE;
+    assert_eq!(svc.total_len(), total);
+
+    // Bulk-purge everything that expired before t=2000 — that's
+    // exactly the even-indexed half.
+    let purge_start = Instant::now();
+    let purged = svc.expire_before(2_000);
+    let purge_elapsed = purge_start.elapsed();
+    eprintln!(
+        "expire_before phase: dropped {purged} KPs in {:?} ({:.0} KP/s)",
+        purge_elapsed,
+        purged as f64 / purge_elapsed.as_secs_f64().max(1e-9)
+    );
+    assert_eq!(purged, total / 2);
+    assert_eq!(svc.total_len(), total / 2);
+}
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_rate_limiter_burst_sliding_window() {
+    use openmls::key_packages::rate_limiter::KeyPackageFetchRateLimiter;
+    use std::time::Instant;
+
+    // Cap of 5 fetches per 60-second window; simulate 50 callers
+    // each issuing 10 fetches at the same instant. The first 5 of
+    // each caller's burst must be allowed; the remainder rejected.
+    let mut rl = KeyPackageFetchRateLimiter::new(5, 60);
+    const NUM_CALLERS: usize = 50;
+    const FETCHES_PER_CALLER: usize = 10;
+
+    let now = 1_000u64;
+    let start = Instant::now();
+    let mut allowed = 0usize;
+    let mut rejected = 0usize;
+    for c in 0..NUM_CALLERS {
+        let user_id = format!("user-{c}").into_bytes();
+        for _ in 0..FETCHES_PER_CALLER {
+            match rl.check_and_record(&user_id, b"dev-0", now) {
+                Ok(_) => allowed += 1,
+                Err(_) => rejected += 1,
+            }
+        }
+    }
+    let elapsed = start.elapsed();
+    let total = NUM_CALLERS * FETCHES_PER_CALLER;
+    eprintln!(
+        "rate-limiter burst: {total} attempts in {:?} ({:.0} req/s); allowed={allowed} \
+         rejected={rejected}",
+        elapsed,
+        total as f64 / elapsed.as_secs_f64().max(1e-9)
+    );
+    assert_eq!(allowed, NUM_CALLERS * 5, "exactly 5/caller must be allowed");
+    assert_eq!(rejected, NUM_CALLERS * (FETCHES_PER_CALLER - 5));
+}
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_last_resort_fallback_under_consumption_at_scale() {
+    use std::time::Instant;
+    let provider = OpenMlsRustCrypto::default();
+    let mut svc = KeyPackageService::new();
+
+    const NUM_DEVICES: usize = 200;
+
+    // Each device gets ONE last-resort + 4 standard KPs. Consume
+    // every standard KP; verify the last-resort survives every fetch.
+    let user_id = b"lastresort-user".to_vec();
+    for d in 0..NUM_DEVICES {
+        let device_id = format!("dev-{d:05}").into_bytes();
+        svc.publish(
+            user_id.clone(),
+            device_id.clone(),
+            entry(&provider, "lr", 1_000_000, true),
+        )
+        .expect("publish lr");
+        for _ in 0..4 {
+            svc.publish(
+                user_id.clone(),
+                device_id.clone(),
+                entry(&provider, "std", 1_000_000, false),
+            )
+            .expect("publish std");
+        }
+    }
+    let consume_start = Instant::now();
+    for d in 0..NUM_DEVICES {
+        let device_id = format!("dev-{d:05}").into_bytes();
+        // 4 standard fetches — each consumes one.
+        for _ in 0..4 {
+            assert!(svc.fetch(&user_id, &device_id, CS).is_some());
+        }
+        // 4 more fetches — all return the persistent last-resort KP.
+        for _ in 0..4 {
+            assert!(svc.fetch(&user_id, &device_id, CS).is_some());
+        }
+    }
+    let consume_elapsed = consume_start.elapsed();
+    eprintln!(
+        "last-resort consumption: {} fetches in {:?} ({:.0} req/s)",
+        NUM_DEVICES * 8,
+        consume_elapsed,
+        (NUM_DEVICES * 8) as f64 / consume_elapsed.as_secs_f64().max(1e-9)
+    );
+    // total_len counts standard KPs only — every standard was consumed.
+    assert_eq!(svc.total_len(), 0);
+}
+
 #[test]
 fn count_for_device_isolates_users_and_devices() {
     // count_for_device must count the (user, device) tuple it was

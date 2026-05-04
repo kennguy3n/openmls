@@ -65,6 +65,7 @@ fn kem_mode(kem: HpkeKemType) -> Result<hpke_types::KemAlgorithm, CryptoError> {
         // ML-KEM draft suites.
         HpkeKemType::XWingKemDraft6
         | HpkeKemType::MlKem768X25519Draft
+        | HpkeKemType::MlKem768Draft
         | HpkeKemType::MlKem1024Draft => Err(CryptoError::UnsupportedCiphersuite),
     }
 }

@@ -2353,6 +2353,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcrux-ml-dsa"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a72929ed421cc3bf16a946b3e7d2a58d215b0b5c2a12be26b53629f081bf49b2"
+dependencies = [
+ "core-models",
+ "hax-lib",
+ "libcrux-intrinsics",
+ "libcrux-macros",
+ "libcrux-platform",
+ "libcrux-sha3",
+]
+
+[[package]]
 name = "libcrux-ml-kem"
 version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2790,6 +2804,7 @@ dependencies = [
  "libcrux-ed25519",
  "libcrux-hkdf",
  "libcrux-hmac",
+ "libcrux-ml-dsa",
  "libcrux-sha2",
  "libcrux-traits",
  "openmls_memory_storage",

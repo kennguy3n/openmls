@@ -5,14 +5,26 @@
 //! `(input_keying_material, expected_ciphertext, expected_shared_secret)`
 //! triple for a specific [`Ciphersuite`].
 //!
-//! Two runners are provided:
+//! Three runners are provided:
 //!
-//! - [`run_xwing_kats`] — gated behind `#[cfg(feature = "xwing")]`,
-//!   exercises the libcrux PQ provider against vectors loaded from
-//!   `pq_kat_vectors/xwing.json`.
-//! - [`run_classical_provider_rejects_pq_kats`] — runs without the
-//!   `xwing` feature, asserts the [`RustCrypto`] provider rejects PQ
-//!   vectors with `UnsupportedCiphersuite`.
+//! - `xwing::run_all` — gated behind `#[cfg(feature = "xwing")]`. For
+//!   every loaded X-Wing vector, derives a keypair from the IKM via
+//!   the libcrux provider, runs `hpke_seal` + `hpke_open`, and
+//!   verifies the plaintext round-trips. A negative companion test
+//!   tampers with the ciphertext and confirms `hpke_open` rejects it.
+//! - `mldsa_runner::run_all` — gated behind `#[cfg(feature =
+//!   "mldsa")]`. For every shipped ML-DSA vector, generates an
+//!   ML-DSA-65 keypair via libcrux, signs a per-vector message,
+//!   verifies, then flips a bit in the signature and confirms verify
+//!   rejects.
+//! - `mlkem_runner::run_all` — runs unconditionally. Schema-only
+//!   today (no provider exposes ML-KEM through HPKE yet), but loads
+//!   every shipped ML-KEM vector, asserts it references a registered
+//!   draft codepoint, and hex-decodes every field so malformed
+//!   vectors fail-fast.
+//!
+//! In addition, the legacy classical-rejection tests assert the
+//! [`RustCrypto`] provider does not advertise any PQ ciphersuite.
 //!
 //! The repo ships with **placeholder** vector files (empty JSON
 //! arrays) for ML-KEM, ML-DSA, and X-Wing. As real KAT vectors land in
@@ -255,6 +267,7 @@ mod xwing {
     }
 
     fn run_one(provider: &LibcruxProvider, v: &PqKatVector) -> Result<(), KatError> {
+        use openmls_traits::types::HpkeConfig;
         let cs = v.ciphersuite()?;
         if !provider.crypto().supported_ciphersuites().contains(&cs) {
             return Err(KatError::UnsupportedCiphersuite {
@@ -264,12 +277,62 @@ mod xwing {
         }
         // Decode all hex fields up front — fail fast on malformed
         // vectors before we touch the crypto provider.
-        let _ikm = hex_decode("input_keying_material", &v.input_keying_material_hex)?;
+        let ikm = hex_decode("input_keying_material", &v.input_keying_material_hex)?;
         let _ct = hex_decode("expected_ciphertext", &v.expected_ciphertext_hex)?;
         let _ss = hex_decode("expected_shared_secret", &v.expected_shared_secret_hex)?;
-        // The actual KEM-level encap/decap call is provider-private.
-        // Real wiring lands when the X-Wing draft publishes finalized
-        // KATs; for now this is a structural smoke check.
+
+        // Functional KAT: derive a keypair from the supplied IKM,
+        // hpke_seal a known plaintext, hpke_open it, and verify the
+        // round-trip recovers the same plaintext. This catches any
+        // wiring regression in the libcrux X-Wing implementation
+        // even before NIST/IRTF publish numeric KATs we can compare
+        // ciphertext bytes against.
+        let kem = cs.hpke_kem_algorithm();
+        let kdf = cs.hpke_kdf_algorithm();
+        let aead = cs.hpke_aead_algorithm();
+        let kp = provider
+            .crypto()
+            .derive_hpke_keypair(HpkeConfig(kem, kdf, aead), &ikm)
+            .map_err(|e| KatError::HexDecode {
+                field: "derive_hpke_keypair",
+                detail: format!("{e:?}"),
+            })?;
+
+        let plaintext = b"openmls-pq-kat-roundtrip";
+        let info = format!("openmls-xwing-kat:{}", v.name);
+        let aad = b"";
+        let sealed = provider
+            .crypto()
+            .hpke_seal(
+                HpkeConfig(kem, kdf, aead),
+                kp.public.as_slice(),
+                info.as_bytes(),
+                aad,
+                plaintext,
+            )
+            .map_err(|e| KatError::HexDecode {
+                field: "hpke_seal",
+                detail: format!("{e:?}"),
+            })?;
+        let recovered = provider
+            .crypto()
+            .hpke_open(
+                HpkeConfig(kem, kdf, aead),
+                &sealed,
+                &kp.private,
+                info.as_bytes(),
+                aad,
+            )
+            .map_err(|e| KatError::HexDecode {
+                field: "hpke_open",
+                detail: format!("{e:?}"),
+            })?;
+        if recovered != plaintext {
+            return Err(KatError::Mismatch {
+                name: v.name.clone(),
+                field: "hpke_roundtrip_plaintext",
+            });
+        }
         Ok(())
     }
 
@@ -277,6 +340,195 @@ mod xwing {
     fn run_all_xwing_kats_loads_and_validates() {
         let n = run_all().expect("xwing KAT run");
         eprintln!("xwing KATs: {n} vector(s) processed");
+    }
+
+    #[test]
+    fn xwing_kat_roundtrip_rejects_tampered_ciphertext() {
+        // Sanity check: a tampered ciphertext must fail HPKE open with
+        // the libcrux provider, otherwise our positive run_all could
+        // be passing trivially.
+        use openmls_traits::types::HpkeConfig;
+        let provider = LibcruxProvider::default();
+        let cs = Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519;
+        let config = HpkeConfig(
+            cs.hpke_kem_algorithm(),
+            cs.hpke_kdf_algorithm(),
+            cs.hpke_aead_algorithm(),
+        );
+        let ikm = hex_decode(
+            "ikm",
+            "a648be1e9f0db017a0a4d65ec3733a7b68f453e24096c824f2b3bcee6330f77e",
+        )
+        .expect("hex");
+        let kem = config.0;
+        let kdf = config.1;
+        let aead = config.2;
+        let kp = provider
+            .crypto()
+            .derive_hpke_keypair(HpkeConfig(kem, kdf, aead), &ikm)
+            .expect("derive");
+        let mut sealed = provider
+            .crypto()
+            .hpke_seal(
+                HpkeConfig(kem, kdf, aead),
+                kp.public.as_slice(),
+                b"info",
+                b"",
+                b"plain",
+            )
+            .expect("seal");
+        // Flip a byte in the ciphertext body so AEAD verification
+        // fails on open.
+        let ct: Vec<u8> = sealed.ciphertext.as_slice().to_vec();
+        let mut tampered = ct;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        sealed.ciphertext = tampered.into();
+        let err = provider
+            .crypto()
+            .hpke_open(
+                HpkeConfig(kem, kdf, aead),
+                &sealed,
+                &kp.private,
+                b"info",
+                b"",
+            )
+            .expect_err("open must fail on tampered ciphertext");
+        eprintln!("tamper check error: {err:?}");
+    }
+}
+
+// =============================================================================
+// FIPS 204 (ML-DSA) KAT runner — real signing/verifying when the libcrux
+// `mldsa` feature is enabled, signature roundtrip + tamper rejection.
+// =============================================================================
+
+#[cfg(feature = "mldsa")]
+mod mldsa_runner {
+    use super::*;
+    use openmls_libcrux_crypto::Provider as LibcruxProvider;
+    use openmls_traits::crypto::OpenMlsCrypto;
+    use openmls_traits::types::SignatureScheme;
+    use openmls_traits::OpenMlsProvider;
+
+    fn vectors_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("pq_kat_vectors")
+            .join("ml_dsa.json")
+    }
+
+    /// Run all ML-DSA KAT vectors loaded from the canonical path.
+    /// The canonical files ship with synthetic vectors — the runner
+    /// uses them as **labels** and exercises a full sign/verify
+    /// round-trip with the libcrux provider for each one (ignoring
+    /// the synthetic ciphertext / shared-secret fields). This is the
+    /// best we can do until NIST publishes machine-readable ML-DSA
+    /// KATs in the format we ingest here.
+    pub fn run_all() -> Result<usize, KatError> {
+        let provider = LibcruxProvider::default();
+        let vectors = load_vectors(&vectors_path())?;
+        let count = vectors.len();
+        for v in vectors {
+            run_one(&provider, &v)?;
+        }
+        Ok(count)
+    }
+
+    fn run_one(provider: &LibcruxProvider, v: &PqKatVector) -> Result<(), KatError> {
+        // Generate a fresh ML-DSA-65 keypair, sign a per-vector
+        // message, verify, then flip a bit and verify the verify
+        // call rejects.
+        let (sk, vk) = provider
+            .crypto()
+            .signature_key_gen(SignatureScheme::MLDSA65)
+            .map_err(|e| KatError::HexDecode {
+                field: "ml_dsa_keygen",
+                detail: format!("{e:?}"),
+            })?;
+        let message = format!("openmls-mldsa-kat:{}", v.name);
+        let sig = provider
+            .crypto()
+            .sign(SignatureScheme::MLDSA65, message.as_bytes(), &sk)
+            .map_err(|e| KatError::HexDecode {
+                field: "ml_dsa_sign",
+                detail: format!("{e:?}"),
+            })?;
+        provider
+            .crypto()
+            .verify_signature(SignatureScheme::MLDSA65, message.as_bytes(), &vk, &sig)
+            .map_err(|_| KatError::Mismatch {
+                name: v.name.clone(),
+                field: "ml_dsa_verify",
+            })?;
+        let mut tampered = sig.clone();
+        let mid = tampered.len() / 2;
+        tampered[mid] ^= 0x01;
+        if provider
+            .crypto()
+            .verify_signature(SignatureScheme::MLDSA65, message.as_bytes(), &vk, &tampered)
+            .is_ok()
+        {
+            return Err(KatError::Mismatch {
+                name: v.name.clone(),
+                field: "ml_dsa_tamper_should_have_failed",
+            });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn run_all_mldsa_kats_loads_and_validates() {
+        let n = run_all().expect("mldsa KAT run");
+        eprintln!("ml-dsa KATs: {n} vector(s) processed");
+    }
+}
+
+// =============================================================================
+// FIPS 203 (ML-KEM) KAT runner — schema-validates only, since neither
+// the libcrux nor the RustCrypto provider currently exposes ML-KEM
+// KEM as an HPKE algorithm.
+// =============================================================================
+
+mod mlkem_runner {
+    use super::*;
+
+    fn vectors_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("pq_kat_vectors")
+            .join("ml_kem.json")
+    }
+
+    /// Schema-only KAT runner: loads + parses + hex-decodes every
+    /// shipped ML-KEM vector. The loop returns the number of
+    /// vectors processed so callers can sanity-check it.
+    ///
+    /// Real ML-KEM encap/decap will plug in here once an ML-KEM
+    /// HPKE algorithm lands on the provider trait.
+    pub fn run_all() -> Result<usize, KatError> {
+        let vectors = load_vectors(&vectors_path())?;
+        let count = vectors.len();
+        for v in &vectors {
+            // Validate the codepoint maps to a known draft variant.
+            let cs = v.ciphersuite()?;
+            assert!(
+                cs.is_draft_codepoint(),
+                "ml_kem.json vector {} references non-draft ciphersuite {cs:?}",
+                v.name
+            );
+            // And the hex fields decode.
+            hex_decode("input_keying_material", &v.input_keying_material_hex)?;
+            hex_decode("expected_ciphertext", &v.expected_ciphertext_hex)?;
+            hex_decode("expected_shared_secret", &v.expected_shared_secret_hex)?;
+        }
+        Ok(count)
+    }
+
+    #[test]
+    fn run_all_mlkem_kats_loads_and_validates() {
+        let n = run_all().expect("mlkem KAT run");
+        eprintln!("ml-kem KATs: {n} vector(s) processed");
     }
 }
 

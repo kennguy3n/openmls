@@ -99,6 +99,12 @@ cargo test -p openmls --test pq_welcome_fanout_tests
 cargo test -p openmls --test pq_telemetry_integration_tests
 cargo test -p openmls --test pq_full_e2e_tests
 cargo test -p openmls --test multi_ciphersuite_public_api
+cargo test -p openmls --test pq_apq_delivery_wire_tests
+cargo test -p openmls --test pq_migration_state_tests
+
+# High-scale load tests are gated behind `#[ignore]`; opt in with --ignored.
+cargo test -p openmls --test pq_load_tests          -- --ignored
+cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored
 
 # Lint + format (matches CI).
 cargo fmt --all -- --check
@@ -194,7 +200,26 @@ and `messages` modules respectively.
   `ModeSelected` → `BootstrapInitiated` → `BootstrapComplete` →
   `FirstFullCommitDone` → `Operational` | `Failed`. `advance` /
   `can_advance` / `is_terminal` make the state machine cheap to
-  observe from dashboards and recovery code.
+  observe from dashboards and recovery code. The accompanying
+  `ConversationLifecycle` projection collapses the fine-grained
+  states onto eight named phases (Classical, UpgradeEligible,
+  UpgradeProposed, UpgradeInProgress, PqActive, ApqBootstrapping,
+  ApqActive, Failed); `KChatMlsConversation` now exposes an
+  optional `migration_state` field plus a `lifecycle()` accessor.
+- [`messages::apq_delivery`](./openmls/src/messages/apq_delivery.rs)
+  — Delivery Service APQ wrapper. `ApqMessage` pairs a payload with
+  a `SessionSide` marker; `ApqCommitPair` bundles a PQ commit + T
+  commit + an `ApqDeliveryOrder` (PqFirst, TFirst, Independent) and
+  rejects misordered FULL pairs via `validate_order`. Mirrored in
+  `delivery-service/ds-lib/src/apq.rs` as an `ApqEnvelope` tagged
+  union for the delivery service crate.
+- [`credentials::capability_protocol`](./openmls/src/credentials/capability_protocol.rs)
+  — wire protocol for client/server capability exchange.
+  `CapabilityPublishRequest` / `CapabilityPublishResponse`,
+  `CapabilityFetchRequest` / `CapabilityFetchResponse`, and
+  `CapabilityUpdateNotification` with TLS codecs, signature
+  verification on every accepted capability, and a registry-backed
+  publish/fetch/notification flow on top of `CapabilityRegistry`.
 
 ## Supported ciphersuites
 
@@ -235,13 +260,22 @@ the `0xFE00`–`0xFEFF` range):
   with ChaCha20-Poly1305 AEAD. Draft codepoint `0xFE02`.
 - **MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448** — pure ML-KEM-1024
   (FIPS 203) with Ed448 signatures. Draft codepoint `0xFE03`.
+- **MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519** — pure ML-KEM-768
+  with classical Ed25519 signatures, AES-256-GCM AEAD. Draft
+  codepoint `0xFE04`.
+- **MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65** — ML-KEM-768
+  + X25519 hybrid KEM with ML-DSA-65 signatures (FIPS 204). Draft
+  codepoint `0xFE05`. Targets `PQ_AUTHENTICITY` deployments.
+- **MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65** — pure ML-KEM-768
+  with ML-DSA-65 signatures. Draft codepoint `0xFE06`.
 
-Planned but not yet wired:
-- ML-DSA signature suites (FIPS 204) for `PQ_AUTHENTICITY` deployments.
-  The `SignatureScheme` enum already exposes `MLDSA44`, `MLDSA65`, and
-  `MLDSA87` variants with draft codepoints (`0x0904`–`0x0906`); both
-  providers reject them today, and provider implementations land once
-  upstream libcrux gains ML-DSA support.
+ML-DSA signature suites (FIPS 204) for `PQ_AUTHENTICITY` deployments.
+The `SignatureScheme` enum exposes `MLDSA44`, `MLDSA65`, and
+`MLDSA87` variants with draft codepoints (`0x0904`–`0x0906`).
+**`MLDSA65` is implemented in the libcrux provider behind the
+`mldsa` feature flag** (key generation, sign, verify); `MLDSA44` and
+`MLDSA87` still return `UnsupportedSignatureScheme`. RustCrypto
+rejects all three.
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`PHASES.md`](./PHASES.md), and
 [`PROGRESS.md`](./PROGRESS.md) for the full roadmap.
@@ -334,6 +368,8 @@ OpenMLS provides the following features
 - **extensions-draft-08**: enable features defined in [MLS extensions draft-08](https://messaginglayersecurity.rocks/mls-extensions/draft-ietf-mls-extensions.html)
 - **fork-resolution**: helper functionality for [resolving forks](https://book.openmls.tech/user_manual/fork-resolution.html).
 - **js**: enable compilation to wasm
+- **mldsa**: enable the ML-DSA-65 signature scheme in the libcrux
+  provider (FIPS 204). Surfaces `openmls_libcrux_crypto/mldsa`.
 - **xwing**: enable the X-Wing draft-06 hybrid KEM ciphersuite
   (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`). Implies
   `libcrux-provider` and is opt-in because the `0x004D` codepoint is a

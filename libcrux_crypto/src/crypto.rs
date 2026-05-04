@@ -50,6 +50,8 @@ impl OpenMlsCrypto for CryptoProvider {
 
         match ciphersuite.signature_algorithm() {
             SignatureScheme::ED25519 => Ok(()),
+            #[cfg(feature = "mldsa")]
+            SignatureScheme::MLDSA65 => Ok(()),
             _ => Err(CryptoError::UnsupportedCiphersuite),
         }?;
 
@@ -222,24 +224,27 @@ impl OpenMlsCrypto for CryptoProvider {
     }
 
     fn signature_key_gen(&self, alg: SignatureScheme) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-        if !matches!(alg, SignatureScheme::ED25519) {
-            return Err(CryptoError::UnsupportedSignatureScheme);
+        match alg {
+            SignatureScheme::ED25519 => {
+                let mut rng = self
+                    .rng
+                    .lock()
+                    .map_err(|_| CryptoError::CryptoLibraryError)
+                    .map(GuardedRng)?;
+
+                libcrux_ed25519::generate_key_pair(&mut rng)
+                    .map_err(|_| CryptoError::SigningError)
+                    .map(|(signing_key, verification_key)| {
+                        (
+                            signing_key.into_bytes().to_vec(),
+                            verification_key.into_bytes().to_vec(),
+                        )
+                    })
+            }
+            #[cfg(feature = "mldsa")]
+            SignatureScheme::MLDSA65 => mldsa65::keygen(self),
+            _ => Err(CryptoError::UnsupportedSignatureScheme),
         }
-
-        let mut rng = self
-            .rng
-            .lock()
-            .map_err(|_| CryptoError::CryptoLibraryError)
-            .map(GuardedRng)?;
-
-        libcrux_ed25519::generate_key_pair(&mut rng)
-            .map_err(|_| CryptoError::SigningError)
-            .map(|(signing_key, verification_key)| {
-                (
-                    signing_key.into_bytes().to_vec(),
-                    verification_key.into_bytes().to_vec(),
-                )
-            })
     }
 
     fn verify_signature(
@@ -249,28 +254,35 @@ impl OpenMlsCrypto for CryptoProvider {
         pk: &[u8],
         signature: &[u8],
     ) -> Result<(), CryptoError> {
-        if !matches!(alg, SignatureScheme::ED25519) {
-            return Err(CryptoError::UnsupportedSignatureScheme);
+        match alg {
+            SignatureScheme::ED25519 => {
+                let pk = <&[u8; 32]>::try_from(pk).map_err(|_| CryptoError::InvalidLength)?;
+                let sk =
+                    <&[u8; 64]>::try_from(signature).map_err(|_| CryptoError::InvalidLength)?;
+
+                libcrux_ed25519::verify(data, pk, sk).map_err(|e| match e {
+                    libcrux_ed25519::Error::InvalidSignature => CryptoError::InvalidSignature,
+                    _ => CryptoError::SigningError,
+                })
+            }
+            #[cfg(feature = "mldsa")]
+            SignatureScheme::MLDSA65 => mldsa65::verify(data, pk, signature),
+            _ => Err(CryptoError::UnsupportedSignatureScheme),
         }
-
-        let pk = <&[u8; 32]>::try_from(pk).map_err(|_| CryptoError::InvalidLength)?;
-        let sk = <&[u8; 64]>::try_from(signature).map_err(|_| CryptoError::InvalidLength)?;
-
-        libcrux_ed25519::verify(data, pk, sk).map_err(|e| match e {
-            libcrux_ed25519::Error::InvalidSignature => CryptoError::InvalidSignature,
-            _ => CryptoError::SigningError,
-        })
     }
 
     fn sign(&self, alg: SignatureScheme, data: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if !matches!(alg, SignatureScheme::ED25519) {
-            return Err(CryptoError::UnsupportedSignatureScheme);
+        match alg {
+            SignatureScheme::ED25519 => {
+                let key = <&[u8; 32]>::try_from(key).map_err(|_| CryptoError::InvalidLength)?;
+                libcrux_ed25519::sign(data, key)
+                    .map_err(|_| CryptoError::SigningError)
+                    .map(|sig| sig.to_vec())
+            }
+            #[cfg(feature = "mldsa")]
+            SignatureScheme::MLDSA65 => mldsa65::sign(self, data, key),
+            _ => Err(CryptoError::UnsupportedSignatureScheme),
         }
-
-        let key = <&[u8; 32]>::try_from(key).map_err(|_| CryptoError::InvalidLength)?;
-        libcrux_ed25519::sign(data, key)
-            .map_err(|_| CryptoError::SigningError)
-            .map(|sig| sig.to_vec())
     }
 
     fn hpke_seal(
@@ -425,9 +437,9 @@ fn hpke_kem(kem: HpkeKemType) -> Result<hpke_rs_crypto::types::KemAlgorithm, Cry
         // libcrux HPKE backend; reject explicitly so callers see the
         // same `UnsupportedCiphersuite` signal they would for any
         // other suite this provider does not speak.
-        HpkeKemType::MlKem768X25519Draft | HpkeKemType::MlKem1024Draft => {
-            Err(CryptoError::UnsupportedCiphersuite)
-        }
+        HpkeKemType::MlKem768X25519Draft
+        | HpkeKemType::MlKem768Draft
+        | HpkeKemType::MlKem1024Draft => Err(CryptoError::UnsupportedCiphersuite),
     }
 }
 
@@ -482,6 +494,108 @@ impl<Rng: RngCore> RngCore for GuardedRng<'_, Rng> {
 
 impl<Rng: RngCore + CryptoRng> CryptoRng for GuardedRng<'_, Rng> {}
 
+/// ML-DSA-65 (FIPS 204) bindings, gated behind the `mldsa` feature.
+///
+/// Wraps the `libcrux-ml-dsa` crate so it can be plugged into
+/// [`OpenMlsCrypto::signature_key_gen`] / [`OpenMlsCrypto::sign`] /
+/// [`OpenMlsCrypto::verify_signature`] for [`SignatureScheme::MLDSA65`].
+///
+/// Key/signature wire format:
+///
+/// - Signing key: raw [`SIGNING_KEY_SIZE`] bytes (4032 bytes).
+/// - Verification key: raw [`VERIFICATION_KEY_SIZE`] bytes (1952 bytes).
+/// - Signature: raw [`SIGNATURE_SIZE`] bytes (3309 bytes).
+///
+/// The `context` parameter on FIPS 204 sign / verify is fixed to the
+/// empty byte string (`b""`) for parity with the way Ed25519 is used in
+/// MLS today; OpenMLS does not currently feed a context string to its
+/// `sign` / `verify` calls.
+#[cfg(feature = "mldsa")]
+mod mldsa65 {
+    use super::*;
+    use libcrux_ml_dsa::{
+        ml_dsa_65::{self, MLDSA65Signature, MLDSA65SigningKey, MLDSA65VerificationKey},
+        KEY_GENERATION_RANDOMNESS_SIZE, SIGNING_RANDOMNESS_SIZE,
+    };
+
+    /// FIPS 204 fixed sizes for ML-DSA-65. The libcrux crate keeps
+    /// these in a `pub(crate)` module, so we re-derive them here from
+    /// the public wrapper types (`SigningKey::len()` etc. are
+    /// `const fn`s on the byte-array wrapper).
+    pub(super) const SIGNING_KEY_LEN: usize = MLDSA65SigningKey::len();
+    pub(super) const VERIFICATION_KEY_LEN: usize = MLDSA65VerificationKey::len();
+    pub(super) const SIGNATURE_LEN: usize = MLDSA65Signature::len();
+
+    /// Generate an ML-DSA-65 keypair using the provider's reseeding RNG.
+    ///
+    /// Returns `(signing_key, verification_key)` as opaque byte vectors,
+    /// matching the convention `OpenMlsCrypto::signature_key_gen` uses for
+    /// every other scheme.
+    pub(super) fn keygen(provider: &CryptoProvider) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+        let mut rng = provider
+            .rng
+            .lock()
+            .map_err(|_| CryptoError::CryptoLibraryError)
+            .map(GuardedRng)?;
+
+        let mut randomness = [0u8; KEY_GENERATION_RANDOMNESS_SIZE];
+        rng.fill_bytes(&mut randomness);
+
+        let kp = ml_dsa_65::generate_key_pair(randomness);
+        let signing_key: Vec<u8> = kp.signing_key.as_ref().to_vec();
+        let verification_key: Vec<u8> = kp.verification_key.as_ref().to_vec();
+        Ok((signing_key, verification_key))
+    }
+
+    /// Sign `data` with `signing_key` using ML-DSA-65 with an empty
+    /// context string.
+    pub(super) fn sign(
+        provider: &CryptoProvider,
+        data: &[u8],
+        signing_key_bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let signing_key_bytes: [u8; SIGNING_KEY_LEN] = signing_key_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+
+        let mut rng = provider
+            .rng
+            .lock()
+            .map_err(|_| CryptoError::CryptoLibraryError)
+            .map(GuardedRng)?;
+        let mut randomness = [0u8; SIGNING_RANDOMNESS_SIZE];
+        rng.fill_bytes(&mut randomness);
+        drop(rng);
+
+        let signing_key = MLDSA65SigningKey::new(signing_key_bytes);
+        let signature = ml_dsa_65::sign(&signing_key, data, b"", randomness)
+            .map_err(|_| CryptoError::SigningError)?;
+        Ok(signature.as_ref().to_vec())
+    }
+
+    /// Verify an ML-DSA-65 `signature` over `data` against
+    /// `verification_key_bytes`. The empty byte string is used as the
+    /// signing context.
+    pub(super) fn verify(
+        data: &[u8],
+        verification_key_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<(), CryptoError> {
+        let verification_key_bytes: [u8; VERIFICATION_KEY_LEN] = verification_key_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+        let signature_bytes: [u8; SIGNATURE_LEN] = signature_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+
+        let verification_key = MLDSA65VerificationKey::new(verification_key_bytes);
+        let signature = MLDSA65Signature::new(signature_bytes);
+
+        ml_dsa_65::verify(&verification_key, data, b"", &signature)
+            .map_err(|_| CryptoError::InvalidSignature)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,18 +648,145 @@ mod tests {
     }
 
     #[test]
-    fn test_libcrux_rejects_mldsa() {
+    fn test_libcrux_rejects_unsupported_mldsa_levels() {
+        // ML-DSA-44 and ML-DSA-87 are not implemented in this provider
+        // even when the `mldsa` feature is enabled — only ML-DSA-65 is
+        // wired.
         let provider = CryptoProvider::new().expect("crypto provider");
-        for scheme in [
-            SignatureScheme::MLDSA44,
-            SignatureScheme::MLDSA65,
-            SignatureScheme::MLDSA87,
-        ] {
+        for scheme in [SignatureScheme::MLDSA44, SignatureScheme::MLDSA87] {
             assert_eq!(
                 provider.signature_key_gen(scheme).err(),
                 Some(CryptoError::UnsupportedSignatureScheme),
                 "libcrux provider must not implement ML-DSA scheme {scheme:?}"
             );
         }
+    }
+
+    #[cfg(not(feature = "mldsa"))]
+    #[test]
+    fn test_libcrux_rejects_mldsa65_without_feature() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        assert_eq!(
+            provider.signature_key_gen(SignatureScheme::MLDSA65).err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA65 when `mldsa` feature is off"
+        );
+        assert_eq!(
+            provider
+                .sign(SignatureScheme::MLDSA65, b"data", b"key")
+                .err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA65 sign without `mldsa` feature"
+        );
+        assert_eq!(
+            provider
+                .verify_signature(SignatureScheme::MLDSA65, b"data", b"pk", b"sig")
+                .err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA65 verify without `mldsa` feature"
+        );
+    }
+
+    #[cfg(feature = "mldsa")]
+    #[test]
+    fn test_libcrux_mldsa65_keygen_sign_verify_roundtrip() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+
+        let (sk, vk) = provider
+            .signature_key_gen(SignatureScheme::MLDSA65)
+            .expect("MLDSA65 keygen must succeed when feature is on");
+
+        // FIPS 204 ML-DSA-65 fixed sizes.
+        assert_eq!(sk.len(), 4032, "ML-DSA-65 signing key should be 4032 bytes");
+        assert_eq!(
+            vk.len(),
+            1952,
+            "ML-DSA-65 verification key should be 1952 bytes"
+        );
+
+        let message = b"hello pq world";
+        let signature = provider
+            .sign(SignatureScheme::MLDSA65, message, &sk)
+            .expect("ML-DSA-65 sign must succeed");
+        assert_eq!(
+            signature.len(),
+            3309,
+            "ML-DSA-65 signature should be 3309 bytes"
+        );
+
+        provider
+            .verify_signature(SignatureScheme::MLDSA65, message, &vk, &signature)
+            .expect("verify must succeed for genuine signature");
+    }
+
+    #[cfg(feature = "mldsa")]
+    #[test]
+    fn test_libcrux_mldsa65_rejects_tampered_signature() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        let (sk, vk) = provider
+            .signature_key_gen(SignatureScheme::MLDSA65)
+            .expect("MLDSA65 keygen must succeed when feature is on");
+
+        let message = b"some message";
+        let mut signature = provider
+            .sign(SignatureScheme::MLDSA65, message, &sk)
+            .expect("ML-DSA-65 sign must succeed");
+        // Flip a bit in the middle of the signature so it can't possibly
+        // verify.
+        let idx = signature.len() / 2;
+        signature[idx] ^= 0x01;
+
+        let err = provider
+            .verify_signature(SignatureScheme::MLDSA65, message, &vk, &signature)
+            .expect_err("verify must fail on tampered signature");
+        assert_eq!(
+            err,
+            CryptoError::InvalidSignature,
+            "tampered ML-DSA-65 signatures must surface as InvalidSignature"
+        );
+    }
+
+    #[cfg(feature = "mldsa")]
+    #[test]
+    fn test_libcrux_mldsa65_rejects_wrong_message() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        let (sk, vk) = provider
+            .signature_key_gen(SignatureScheme::MLDSA65)
+            .expect("MLDSA65 keygen must succeed when feature is on");
+
+        let signature = provider
+            .sign(SignatureScheme::MLDSA65, b"signed message", &sk)
+            .expect("ML-DSA-65 sign must succeed");
+        let err = provider
+            .verify_signature(
+                SignatureScheme::MLDSA65,
+                b"some other message",
+                &vk,
+                &signature,
+            )
+            .expect_err("verify must fail when message differs");
+        assert_eq!(err, CryptoError::InvalidSignature);
+    }
+
+    #[cfg(feature = "mldsa")]
+    #[test]
+    fn test_libcrux_mldsa65_rejects_invalid_lengths() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        // Wrong-length signing key.
+        let err = provider
+            .sign(SignatureScheme::MLDSA65, b"data", b"too short")
+            .expect_err("sign must fail on short signing key");
+        assert_eq!(err, CryptoError::InvalidLength);
+
+        // Wrong-length verification key + signature.
+        let err = provider
+            .verify_signature(
+                SignatureScheme::MLDSA65,
+                b"data",
+                b"too short vk",
+                b"too short sig",
+            )
+            .expect_err("verify must fail on short keys/signatures");
+        assert_eq!(err, CryptoError::InvalidLength);
     }
 }

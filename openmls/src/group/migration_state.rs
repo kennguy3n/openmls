@@ -27,6 +27,87 @@
 
 use crate::ciphersuite::SecurityMode;
 
+/// High-level lifecycle phase of a KChat conversation, modelled after
+/// the eight named phases listed in the KChat migration design
+/// (PROPOSAL §6 / PHASES §3): Classical → UpgradeEligible →
+/// UpgradeProposed → UpgradeInProgress → PqActive → ApqBootstrapping
+/// → ApqActive, plus a terminal Failed.
+///
+/// This enum is a *projection* of the fine-grained
+/// [`MigrationStateMachine`] (which keeps each individual orchestration
+/// step) onto a small, dashboard-friendly view. It is what UI / metrics
+/// / on-disk persistence layers should serialize; the fine-grained
+/// machine is what the orchestration code drives.
+///
+/// Use [`ConversationLifecycle::from_state_machine`] to derive the
+/// projection from a [`MigrationStateMachine`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConversationLifecycle {
+    /// Conversation is purely classical; no migration in progress.
+    Classical,
+    /// Every member has advertised PQ capabilities; the conversation
+    /// is eligible for upgrade.
+    UpgradeEligible,
+    /// An upgrade proposal has been broadcast but not yet accepted.
+    UpgradeProposed,
+    /// The reinit/bootstrap exchange is in flight.
+    UpgradeInProgress,
+    /// Reinit landed and the conversation is now running under a PQ
+    /// (DIRECT_PQ) ciphersuite.
+    PqActive,
+    /// APQ paired-session bootstrap is in flight.
+    ApqBootstrapping,
+    /// APQ T+PQ paired sessions are operational.
+    ApqActive,
+    /// Migration has failed; the carried `String` is the human-readable
+    /// reason.
+    Failed(String),
+}
+
+impl ConversationLifecycle {
+    /// Project a [`MigrationStateMachine`] onto a high-level
+    /// [`ConversationLifecycle`] phase. The mapping deliberately groups
+    /// several fine-grained states into a single lifecycle phase (e.g.
+    /// `KeyPackagesPublished` and `ModeSelected` both project to
+    /// `UpgradeProposed`) — callers that need the precise step should
+    /// inspect the underlying machine directly.
+    pub fn from_state_machine(sm: &MigrationStateMachine) -> Self {
+        let target_is_apq = matches!(
+            sm.target_mode(),
+            Some(SecurityMode::PqConfidentiality) | Some(SecurityMode::PqAuthenticity)
+        );
+        match sm.state() {
+            MigrationState::NotStarted => ConversationLifecycle::Classical,
+            MigrationState::CapabilitiesCollected => ConversationLifecycle::UpgradeEligible,
+            MigrationState::KeyPackagesPublished | MigrationState::ModeSelected => {
+                ConversationLifecycle::UpgradeProposed
+            }
+            MigrationState::BootstrapInitiated => {
+                if target_is_apq {
+                    ConversationLifecycle::ApqBootstrapping
+                } else {
+                    ConversationLifecycle::UpgradeInProgress
+                }
+            }
+            MigrationState::BootstrapComplete | MigrationState::FirstFullCommitDone => {
+                if target_is_apq {
+                    ConversationLifecycle::ApqBootstrapping
+                } else {
+                    ConversationLifecycle::PqActive
+                }
+            }
+            MigrationState::Operational => {
+                if target_is_apq {
+                    ConversationLifecycle::ApqActive
+                } else {
+                    ConversationLifecycle::PqActive
+                }
+            }
+            MigrationState::Failed(reason) => ConversationLifecycle::Failed(reason.clone()),
+        }
+    }
+}
+
 /// Lifecycle phase of a conversation migration. See module-level docs
 /// for the legal transitions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -514,6 +595,55 @@ mod tests {
             .unwrap();
         match sm.state() {
             MigrationState::Failed(reason) => assert_eq!(reason, "provider crashed"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_projection_classical_when_not_started() {
+        let sm = MigrationStateMachine::new(conv_id());
+        assert_eq!(
+            ConversationLifecycle::from_state_machine(&sm),
+            ConversationLifecycle::Classical
+        );
+    }
+
+    #[test]
+    fn lifecycle_projection_upgrade_eligible_after_capabilities() {
+        let mut sm = MigrationStateMachine::new(conv_id());
+        sm.advance(MigrationEvent::CapabilitiesReady).unwrap();
+        assert_eq!(
+            ConversationLifecycle::from_state_machine(&sm),
+            ConversationLifecycle::UpgradeEligible
+        );
+    }
+
+    #[test]
+    fn lifecycle_projection_apq_active_when_target_is_apq_confidentiality() {
+        let mut sm = MigrationStateMachine::new(conv_id());
+        sm.advance(MigrationEvent::CapabilitiesReady).unwrap();
+        sm.advance(MigrationEvent::KeyPackagesReady).unwrap();
+        sm.advance(MigrationEvent::ModeSelected(
+            SecurityMode::PqConfidentiality,
+        ))
+        .unwrap();
+        sm.advance(MigrationEvent::BootstrapStarted).unwrap();
+        sm.advance(MigrationEvent::BootstrapDone).unwrap();
+        sm.advance(MigrationEvent::FirstFullCommitDone).unwrap();
+        sm.advance(MigrationEvent::FirstFullCommitDone).unwrap();
+        assert_eq!(sm.state(), &MigrationState::Operational);
+        assert_eq!(
+            ConversationLifecycle::from_state_machine(&sm),
+            ConversationLifecycle::ApqActive
+        );
+    }
+
+    #[test]
+    fn lifecycle_projection_failed_carries_reason() {
+        let mut sm = MigrationStateMachine::new(conv_id());
+        sm.advance(MigrationEvent::Failed("nope".into())).unwrap();
+        match ConversationLifecycle::from_state_machine(&sm) {
+            ConversationLifecycle::Failed(reason) => assert_eq!(reason, "nope"),
             other => panic!("expected Failed, got {other:?}"),
         }
     }
