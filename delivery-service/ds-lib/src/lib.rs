@@ -5,6 +5,7 @@
 //!
 //! Clients are represented by the `ClientInfo` struct.
 
+pub mod apq;
 pub mod messages;
 
 use std::collections::HashSet;
