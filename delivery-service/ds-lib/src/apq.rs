@@ -118,7 +118,6 @@ impl Deserialize for ApqEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tls_codec::{Deserialize as _, Serialize as _};
 
     #[test]
     fn apq_envelope_round_trips_single_message() {
@@ -149,7 +148,7 @@ mod tests {
     fn apq_envelope_rejects_unknown_tag() {
         // Smallest possible bogus tag: 0xFF + nothing else.
         let bogus = [0xFFu8];
-        let err = ApqEnvelope::tls_deserialize_exact(&bogus).expect_err("must reject");
+        let err = ApqEnvelope::tls_deserialize_exact(bogus.as_slice()).expect_err("must reject");
         assert!(matches!(err, Error::DecodingError(_)));
     }
 }

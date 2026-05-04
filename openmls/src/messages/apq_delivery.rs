@@ -332,7 +332,6 @@ impl TlsDeserializeTrait for ApqCommitPair {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tls_codec::{Deserialize as _, Serialize as _};
 
     #[test]
     fn apq_message_round_trips_t_payload() {
@@ -357,7 +356,7 @@ mod tests {
         // Build a two-byte payload: bogus side byte (0xFF) + empty
         // length-prefixed VLBytes (0x00).
         let bogus = [0xFFu8, 0x00];
-        let err = ApqMessage::tls_deserialize_exact(&bogus).expect_err("must reject");
+        let err = ApqMessage::tls_deserialize_exact(bogus.as_slice()).expect_err("must reject");
         assert!(matches!(err, TlsError::DecodingError(_)));
     }
 

@@ -79,6 +79,6 @@ fn delivery_order_rejects_unknown_byte() {
     // Hand-crafted invalid discriminant must round-trip to a
     // DecodingError on tls_deserialize.
     let bogus = [0xAAu8];
-    let err = ApqDeliveryOrder::tls_deserialize_exact(&bogus).expect_err("must reject");
+    let err = ApqDeliveryOrder::tls_deserialize_exact(bogus.as_slice()).expect_err("must reject");
     assert!(matches!(err, tls_codec::Error::DecodingError(_)));
 }
