@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — In progress | ~55%**
+**Status: Phase 0 — Complete | Phase 1–2 / 5–6 — In progress | ~25%**
 
 ## Version Targets
 
@@ -79,13 +79,25 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 #### APQ-MLS combiner
 
-- [ ] Design the `KChatMlsConversation` orchestration struct.
-- [ ] Implement dual-session (T + PQ) group management.
-- [ ] Implement the FULL commit flow:
-      PQ commit → PSK derivation → T commit with PSK.
-- [ ] Implement the PARTIAL commit flow for T-session-only updates.
-- [ ] Implement the `APQInfo` extension and downgrade prevention.
-- [ ] Implement `APQWelcome` for bootstrap.
+- [x] Design the `KChatMlsConversation` orchestration struct
+      (`openmls/src/group/kchat_conversation.rs`). Skeleton with classical /
+      direct-PQ / APQ constructors, mode helpers, pending-commit tracking,
+      and `apq_info` linkage.
+- [ ] Implement dual-session (T + PQ) group management — orchestration
+      skeleton landed; live wiring against `MlsGroup` is still pending.
+- [x] Implement the FULL commit flow skeleton
+      (`openmls/src/group/apq_commit.rs`):
+      preconditions, in-flight tracking, error surface. PQ commit → PSK
+      derivation → T commit with PSK still returns `NotImplemented` until
+      the live MLS wiring lands.
+- [x] Implement the PARTIAL commit flow skeleton
+      (`openmls/src/group/apq_commit.rs`): policy gate, in-flight
+      tracking, error surface. Live MLS wiring still pending.
+- [x] Implement the `APQInfo` extension and downgrade prevention
+      (`openmls/src/extensions/apq_info.rs`,
+      `openmls/src/group/no_downgrade.rs`).
+- [x] Implement `APQWelcome` for bootstrap
+      (`openmls/src/messages/apq_welcome.rs`).
 
 #### Migration protocol
 
@@ -97,12 +109,16 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       PqConfidentiality / PqAuthenticity, mode + ciphersuite selection from
       a peer set, no-downgrade transition helper — see
       `openmls/src/ciphersuite/security_mode.rs`).
-- [ ] Implement multi-ciphersuite KeyPackage publication.
-- [ ] Implement conversation upgrade logic (new conversations first).
+- [x] Implement multi-ciphersuite KeyPackage publication
+      (`openmls/src/key_packages/multi_ciphersuite.rs`).
+- [x] Implement conversation upgrade logic for new conversations
+      (`openmls/src/group/conversation_upgrade.rs`).
 - [ ] Implement the MLS `ReInit` flow for 1:1 and small group upgrades.
 - [ ] Implement APQ bootstrap for larger group upgrades.
-- [ ] Implement the FULL/PARTIAL commit policy engine.
-- [ ] Implement no-downgrade enforcement rules.
+- [x] Implement the FULL/PARTIAL commit policy engine
+      (`openmls/src/group/pq_policy.rs`).
+- [x] Implement no-downgrade enforcement rules
+      (`openmls/src/group/no_downgrade.rs`).
 
 #### Server components
 
@@ -117,7 +133,8 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 #### Testing and validation
 
 - [ ] Classical / PQ / APQ interop test vectors.
-- [ ] Downgrade rejection tests.
+- [x] Downgrade rejection tests
+      (`openmls/tests/pq_downgrade_tests.rs` — 11 integration tests).
 - [ ] PQ KeyPackage storage load testing.
 - [ ] Welcome fanout load testing at target scale.
 - [ ] Client resync after a missed PQ/T commit pair.
@@ -136,6 +153,76 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs                          |
 
 ## Changelog
+
+### 2026-05-04 (orchestration layer)
+
+- Added `KChatMlsConversation` orchestration struct
+  (`openmls/src/group/kchat_conversation.rs`) with constructors for
+  classical, direct-PQ, and APQ modes, accessors for the underlying T /
+  PQ groups, mode-classification helpers (`is_classical`, `is_pq`,
+  `is_apq`), pending-FULL-commit tracking, and APQInfo linkage. Each
+  constructor validates its preconditions before returning
+  (`KChatConversationError`). 4 unit tests cover error shapes and
+  precondition checks.
+- Added `ApqInfo` extension struct
+  (`openmls/src/extensions/apq_info.rs`): T/PQ group IDs, T/PQ epochs,
+  T/PQ ciphersuites, and `SecurityMode`. Hand-rolled TLS codec
+  (`SecurityMode` encoded as `u8`), `validate()` (rejects classical
+  mode, ciphersuite/mode mismatch, duplicate group IDs, epoch drift
+  beyond `MAX_EPOCH_DRIFT = 1`), and `matches_groups()`. 11 unit tests.
+- Added `PqPolicy` and the FULL/PARTIAL commit policy engine
+  (`openmls/src/group/pq_policy.rs`). `PqPolicy` is
+  `Classical < PqConfidentiality < PqRequired` with `Ord`. Const
+  `required_commit_type(trigger)` implements the PHASES.md Phase 5
+  table for all 7 `CommitTrigger` values. 12 unit tests cover every
+  policy × trigger combination.
+- Added the no-downgrade enforcement layer
+  (`openmls/src/group/no_downgrade.rs`). `ConversationSecurityState`
+  tracks `current_mode`, `highest_mode_ever`, `policy_floor`, and
+  `pinned_ciphersuite`. Five validators (`validate_mode_change`,
+  `validate_joiner_key_package`, `validate_apq_info_change`,
+  `validate_epoch_consistency`, `validate_ciphersuite_pin`) cover
+  Phase 6's rejection rules. `DowngradeError` enumerates 8 distinct
+  rejection reasons. 19 unit tests.
+- Added the multi-ciphersuite KeyPackage helper
+  (`openmls/src/key_packages/multi_ciphersuite.rs`). Generates a
+  `KeyPackageBundle` for every ciphersuite advertised in a
+  `DeviceCapability`, deduplicates between classical and PQ lists,
+  enforces a per-device cap (`MAX_KEY_PACKAGES_PER_DEVICE = 16`), and
+  exposes per-suite / classical / PQ accessors. 6 unit tests, including
+  one that drives an actual classical KeyPackage build through the
+  RustCrypto provider.
+- Added the conversation-upgrade selector
+  (`openmls/src/group/conversation_upgrade.rs`). `select_conversation_mode`
+  uses `SecurityMode::select_mode` + `select_ciphersuite` to pick the
+  highest mode every peer supports plus the best ciphersuite for that
+  mode, and falls closed (no silent downgrade) when no common
+  ciphersuite exists. 7 unit tests cover all-classical, mixed,
+  all-PQ-confidentiality, all-PQ-authenticity (with and without ML-DSA
+  suites available), single-peer, and error paths.
+- Added the FULL/PARTIAL commit flow skeletons
+  (`openmls/src/group/apq_commit.rs`). `prepare_full_commit` and
+  `prepare_partial_commit` validate preconditions (mode, policy,
+  in-flight FULL commit, conversation shape) and currently return
+  `ApqCommitError::NotImplemented` until the live MLS wiring lands.
+  `FullCommitResult` and `PartialCommitResult` capture the eventual
+  output shape. 10 unit tests cover error surfaces, policy gating,
+  in-flight detection, and result shape.
+- Added `ApqWelcome` (`openmls/src/messages/apq_welcome.rs`) bundling
+  the T-side and PQ-side `Welcome`s, the `ApqInfo` link record, and the
+  initial `apq_psk` `PreSharedKeyId`. Hand-rolled TLS codec encoding
+  `Option<T>` as a u8 presence flag, `validate()` cross-checks
+  ciphersuites against `apq_info`, and `extract_group_ids()` exposes
+  both group IDs in one call. 10 unit tests cover roundtrip, validation
+  (APQ and direct-PQ paths), ciphersuite mismatches, missing PSK ID,
+  and invalid presence bytes.
+- Added `openmls/tests/pq_downgrade_tests.rs` (11 integration tests)
+  covering: PQ-required conversations rejecting classical KeyPackages,
+  APQInfo removal rejection, mode downgrades from PqAuthenticity →
+  PqConfidentiality and PqConfidentiality → Classical, epoch
+  mismatches, ciphersuite changes after bootstrap, the full upgrade
+  path Classical → PqConfidentiality → PqAuthenticity, group-ID
+  mismatches, and unchanged-APQInfo replay.
 
 ### 2026-05-04 (later session)
 

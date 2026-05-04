@@ -101,6 +101,44 @@ cargo clippy --workspace --tests -- -D warnings
 - [`PROGRESS.md`](./PROGRESS.md) — implementation status, version targets,
   changelog, known gaps.
 
+## PQ orchestration layer
+
+The fork ships an in-tree orchestration layer that downstream KChat clients
+use to drive the dual-session APQ design without reimplementing the
+no-downgrade and policy logic. All modules below live in the `openmls`
+crate and are exported under the `group`, `extensions`, `key_packages`,
+and `messages` modules respectively.
+
+- [`group::kchat_conversation::KChatMlsConversation`](./openmls/src/group/kchat_conversation.rs)
+  — orchestration container holding the optional T (classical) and PQ
+  groups, the `ApqInfo` link record, the `PqPolicy`, and the
+  pending-FULL-commit flag.
+- [`extensions::apq_info::ApqInfo`](./openmls/src/extensions/apq_info.rs)
+  — link record between the T and PQ sessions: T/PQ group IDs, T/PQ
+  epochs, T/PQ ciphersuites, and the `SecurityMode`.
+- [`group::pq_policy`](./openmls/src/group/pq_policy.rs)
+  — `PqPolicy` × `CommitTrigger` → `CommitType` table implementing
+  PHASES.md Phase 5 (FULL on membership/credential changes,
+  PARTIAL on T-only updates).
+- [`group::no_downgrade`](./openmls/src/group/no_downgrade.rs)
+  — `ConversationSecurityState` plus five validators enforcing the
+  Phase 6 no-downgrade rules (mode change, joiner KP, APQInfo change,
+  epoch consistency, ciphersuite pin).
+- [`key_packages::multi_ciphersuite::MultiCiphersuiteKeyPackages`](./openmls/src/key_packages/multi_ciphersuite.rs)
+  — Phase 1 helper that generates a `KeyPackageBundle` for every
+  ciphersuite in a `DeviceCapability`, deduplicates between classical
+  and PQ lists, and enforces a per-device cap.
+- [`group::conversation_upgrade::select_conversation_mode`](./openmls/src/group/conversation_upgrade.rs)
+  — Phase 2 selector that picks the highest mode every peer supports
+  plus the best ciphersuite for that mode.
+- [`group::apq_commit`](./openmls/src/group/apq_commit.rs)
+  — `prepare_full_commit` and `prepare_partial_commit` skeletons that
+  validate preconditions and policy gating today; live MLS wiring lands
+  later.
+- [`messages::apq_welcome::ApqWelcome`](./openmls/src/messages/apq_welcome.rs)
+  — Phase 4 bootstrap envelope bundling the T and PQ `Welcome`s, the
+  `ApqInfo`, and the initial `apq_psk` `PreSharedKeyId`.
+
 ## Supported ciphersuites
 
 ### Classical (production)

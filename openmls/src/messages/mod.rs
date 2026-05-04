@@ -34,10 +34,13 @@ use crate::{
 use openmls_traits::random::OpenMlsRand;
 
 pub(crate) mod codec;
+pub mod apq_welcome;
 pub mod external_proposals;
 pub mod group_info;
 pub mod proposals;
 pub mod proposals_in;
+
+pub use apq_welcome::{ApqWelcome, ApqWelcomeError};
 
 #[cfg(test)]
 mod tests;

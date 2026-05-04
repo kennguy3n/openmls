@@ -20,6 +20,13 @@ pub(crate) mod errors;
 pub(crate) mod mls_group;
 pub(crate) mod public_group;
 
+// Public — KChat orchestration layer
+pub mod apq_commit;
+pub mod conversation_upgrade;
+pub mod kchat_conversation;
+pub mod no_downgrade;
+pub mod pq_policy;
+
 // Public
 pub use errors::*;
 pub use group_context::GroupContext;
@@ -34,6 +41,18 @@ pub use mls_group::proposal_store::*;
 pub use mls_group::staged_commit::StagedCommit;
 pub use mls_group::{Member, *};
 pub use public_group::*;
+
+pub use apq_commit::{
+    prepare_full_commit, prepare_partial_commit, ApqCommitError, FullCommitResult,
+    PartialCommitResult,
+};
+pub use conversation_upgrade::{select_conversation_mode, ConversationUpgradeError};
+pub use kchat_conversation::{KChatConversationError, KChatMlsConversation};
+pub use no_downgrade::{
+    validate_apq_info_change, validate_ciphersuite_pin, validate_epoch_consistency,
+    validate_joiner_key_package, validate_mode_change, ConversationSecurityState, DowngradeError,
+};
+pub use pq_policy::{CommitTrigger, CommitType, PqPolicy};
 
 // Private
 #[cfg(feature = "fork-resolution")]

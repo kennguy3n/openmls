@@ -188,8 +188,11 @@ of draft suites.
 
 ## KChat Orchestration Layer
 
-The orchestration layer lives **outside core OpenMLS** and uses the existing
-`MlsGroup` API as a primitive. The conceptual shape:
+The orchestration layer lives **inside this fork** of OpenMLS — it is
+implemented as scaffolding modules in the `openmls` crate that downstream
+KChat clients compose with the existing `MlsGroup` API. Keeping the
+scaffolding in-tree avoids re-deriving the wire format and policy rules
+in every downstream embedder.
 
 ```rust
 KChatMlsConversation {
@@ -217,6 +220,29 @@ Responsibilities of this layer:
 
 This keeps OpenMLS itself focused on RFC 9420 group operations while letting
 KChat compose them into the APQ pattern.
+
+### `KChatMlsConversation` and supporting modules
+
+The orchestration layer is implemented as the following modules in the
+`openmls` crate:
+
+| Module                                     | Path                                                     | Role                                                                                |
+|--------------------------------------------|----------------------------------------------------------|-------------------------------------------------------------------------------------|
+| `KChatMlsConversation`                     | `openmls/src/group/kchat_conversation.rs`                | Top-level conversation container; holds T/PQ `MlsGroup`s, `ApqInfo`, `PqPolicy`.    |
+| `ApqInfo`                                  | `openmls/src/extensions/apq_info.rs`                     | Link record between the T and PQ sessions; TLS-encoded extension; `validate()`.     |
+| `ApqWelcome`                               | `openmls/src/messages/apq_welcome.rs`                    | Bootstrap envelope — paired `Welcome`s + `ApqInfo` + initial `apq_psk` PSK ID.      |
+| `PqPolicy` / `CommitTrigger` / `CommitType`| `openmls/src/group/pq_policy.rs`                         | FULL/PARTIAL commit policy table from PHASES.md Phase 5.                            |
+| `ConversationSecurityState` + validators   | `openmls/src/group/no_downgrade.rs`                      | Phase 6 no-downgrade enforcement (mode change, joiner KP, APQInfo, epoch, pin).     |
+| `MultiCiphersuiteKeyPackages`              | `openmls/src/key_packages/multi_ciphersuite.rs`          | Phase 1 multi-ciphersuite KeyPackage publication helper, per-device cap enforced.   |
+| `select_conversation_mode`                 | `openmls/src/group/conversation_upgrade.rs`              | Phase 2 selector: highest mode all peers support + best ciphersuite for that mode.  |
+| `prepare_full_commit` / `prepare_partial_commit` | `openmls/src/group/apq_commit.rs`                  | FULL / PARTIAL commit flow skeletons; preconditions and policy enforced today.      |
+
+The two flow skeletons currently return `ApqCommitError::NotImplemented`
+once their preconditions pass — the live MLS wiring (PQ commit → exporter
+→ `PreSharedKey(apq_psk_id)` → T commit) lands in a follow-up phase. All
+seven public types above carry full unit-test coverage in their respective
+modules; downgrade rejection is additionally exercised through
+`openmls/tests/pq_downgrade_tests.rs`.
 
 ### `DeviceCapability` and `SecurityMode`
 

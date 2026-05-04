@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — In Progress (~55%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 5–6 — In progress (~25%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
@@ -52,6 +52,16 @@ can speak, classical and PQ:
 Definition of done: PQ-capable devices can publish and rotate PQ KeyPackages,
 and other clients can fetch the right KeyPackage for a target ciphersuite.
 
+**Implementation note (2026-05-04):** the multi-ciphersuite KeyPackage
+publication helper has landed at
+[`openmls/src/key_packages/multi_ciphersuite.rs`](./openmls/src/key_packages/multi_ciphersuite.rs).
+`MultiCiphersuiteKeyPackages::generate_for_capability` walks a
+`DeviceCapability`, deduplicates between the classical and PQ lists, and
+generates one `KeyPackageBundle` per advertised ciphersuite. Per-device
+cap is enforced (`MAX_KEY_PACKAGES_PER_DEVICE = 16`) so a misbehaving
+capability cannot blow up storage. Server-side per-suite indexing /
+last-resort semantics still belong to the KeyPackage service.
+
 ## Phase 2 — Upgrade New Conversations First
 
 The simplest, lowest-risk traffic to upgrade is **new** conversations:
@@ -66,6 +76,17 @@ The simplest, lowest-risk traffic to upgrade is **new** conversations:
 
 Definition of done: every new conversation among PQ-capable devices is created
 in PQ mode by default, and classical traffic is unaffected.
+
+**Implementation note (2026-05-04):** the conversation-creation selector
+has landed at
+[`openmls/src/group/conversation_upgrade.rs`](./openmls/src/group/conversation_upgrade.rs).
+`select_conversation_mode` consumes a slice of `DeviceCapability`
+references, picks the highest mode every peer supports via
+`SecurityMode::select_mode`, and then picks the best ciphersuite for
+that mode via `SecurityMode::select_ciphersuite`. It fails closed when
+no common ciphersuite exists rather than silently downgrading. The
+actual `KChatMlsConversation` constructor that consumes this output is
+follow-up wiring.
 
 ## Phase 3 — Upgrade Existing 1:1 and Small Groups
 
@@ -126,6 +147,16 @@ Add and remove are non-negotiable FULL operations: a removed device must lose
 access to the **next** PQ-derived secret, otherwise PQ confidentiality is
 broken.
 
+**Implementation note (2026-05-04):** the FULL/PARTIAL policy engine has
+landed at
+[`openmls/src/group/pq_policy.rs`](./openmls/src/group/pq_policy.rs).
+`PqPolicy::required_commit_type(trigger)` is a `const fn` implementing
+the table above for every `CommitTrigger`. The `prepare_full_commit` /
+`prepare_partial_commit` skeletons in
+[`openmls/src/group/apq_commit.rs`](./openmls/src/group/apq_commit.rs)
+consume the policy decision and validate preconditions (mode, in-flight
+FULL commit) before invoking the still-stubbed live commit logic.
+
 ## Phase 6 — Enforce No-Downgrade Rules
 
 Once a conversation has reached `PQ_REQUIRED`, the orchestration layer (and
@@ -143,6 +174,18 @@ the server, where it is policy-aware) MUST reject:
 Definition of done: a misbehaving server, a downgraded peer, or a malicious
 member cannot silently move a `PQ_REQUIRED` conversation back to classical
 without the orchestration layer detecting and rejecting the change.
+
+**Implementation note (2026-05-04):** the no-downgrade enforcement layer
+has landed at
+[`openmls/src/group/no_downgrade.rs`](./openmls/src/group/no_downgrade.rs).
+`ConversationSecurityState` plus five validators
+(`validate_mode_change`, `validate_joiner_key_package`,
+`validate_apq_info_change`, `validate_epoch_consistency`,
+`validate_ciphersuite_pin`) cover every rejection rule above.
+[`openmls/src/extensions/apq_info.rs`](./openmls/src/extensions/apq_info.rs)
+adds the `ApqInfo` link record with its own self-validation, and
+[`openmls/tests/pq_downgrade_tests.rs`](./openmls/tests/pq_downgrade_tests.rs)
+exercises the rules end-to-end through the public API.
 
 ## Server Components
 
