@@ -34,8 +34,10 @@ RustCrypto provider does **not** implement any PQ primitives.
 - **MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519** — X-Wing hybrid KEM
   (ML-KEM-768 + X25519), draft codepoint `0x004D`, libcrux provider only.
   Use only with the `libcrux-provider` feature; selecting this suite on the
-  RustCrypto provider returns `UnsupportedCiphersuite` (HNDL-bridge
-  confidentiality, classical Ed25519 authenticity).
+  RustCrypto provider currently **panics** (`unimplemented!`) — replacing
+  this with an `UnsupportedCiphersuite` error is tracked in
+  [`PROGRESS.md`](./PROGRESS.md). Provides HNDL-bridge confidentiality with
+  classical Ed25519 authenticity.
 
 Planned, tracking the
 [IETF MLS PQ ciphersuite draft](https://datatracker.ietf.org/doc/draft-ietf-mls-mls-pq-cs/)
