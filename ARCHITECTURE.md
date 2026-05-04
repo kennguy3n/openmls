@@ -235,14 +235,26 @@ The orchestration layer is implemented as the following modules in the
 | `ConversationSecurityState` + validators   | `openmls/src/group/no_downgrade.rs`                      | Phase 6 no-downgrade enforcement (mode change, joiner KP, APQInfo, epoch, pin).     |
 | `MultiCiphersuiteKeyPackages`              | `openmls/src/key_packages/multi_ciphersuite.rs`          | Phase 1 multi-ciphersuite KeyPackage publication helper, per-device cap enforced.   |
 | `select_conversation_mode`                 | `openmls/src/group/conversation_upgrade.rs`              | Phase 2 selector: highest mode all peers support + best ciphersuite for that mode.  |
-| `prepare_full_commit` / `prepare_partial_commit` | `openmls/src/group/apq_commit.rs`                  | FULL / PARTIAL commit flow skeletons; preconditions and policy enforced today.      |
+| `prepare_full_commit` / `prepare_partial_commit` | `openmls/src/group/apq_commit.rs`                  | FULL / PARTIAL commit flows wired to `MlsGroup::commit_builder` and the MLS exporter. |
+| `bootstrap_apq`                            | `openmls/src/group/kchat_conversation.rs`                | Phase 4 APQ bootstrap: links a PQ group to an existing T group and emits an `ApqWelcome`. |
+| `propose_reinit` / `commit_reinit` / `complete_reinit` | `openmls/src/group/reinit_upgrade.rs`        | Phase 3 ReInit upgrade path; derives the Resumption(ReInit) PSK via the MLS exporter. |
+| `detect_desync` / `resync_from_pq` / `resync_from_t` / `force_resync` | `openmls/src/group/apq_resync.rs` | Recovery when a client misses one half of a FULL commit pair (`MAX_EPOCH_DRIFT = 1`). |
 
-The two flow skeletons currently return `ApqCommitError::NotImplemented`
-once their preconditions pass — the live MLS wiring (PQ commit → exporter
-→ `PreSharedKey(apq_psk_id)` → T commit) lands in a follow-up phase. All
-seven public types above carry full unit-test coverage in their respective
-modules; downgrade rejection is additionally exercised through
-`openmls/tests/pq_downgrade_tests.rs`.
+FULL and PARTIAL commits are wired through `MlsGroup::commit_builder`:
+`prepare_full_commit` runs the PQ commit first, derives `apq_psk` via
+the MLS exporter (`APQ_PSK_LABEL = "kchat-apq-psk"`, 32 bytes), stores
+the resulting `PreSharedKeyId` on the provider, and runs the T commit
+with a `PreSharedKey(apq_psk_id)` proposal. `prepare_partial_commit`
+drives a T-session-only commit and leaves the PQ session unchanged.
+`bootstrap_apq`, `reinit_upgrade`, and `apq_resync` provide the
+lifecycle entrypoints around those commit primitives. All public types
+above carry full unit-test coverage in their respective modules;
+downgrade rejection, the bootstrap-to-FULL lifecycle, and KAT/interop
+shapes are additionally exercised through
+`openmls/tests/pq_downgrade_tests.rs`,
+`openmls/tests/pq_lifecycle_tests.rs`,
+`openmls/tests/pq_interop_tests.rs`, and
+`openmls/tests/pq_kat_tests.rs`.
 
 ### `DeviceCapability` and `SecurityMode`
 

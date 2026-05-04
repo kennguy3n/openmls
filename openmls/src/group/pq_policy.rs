@@ -111,10 +111,9 @@ impl PqPolicy {
             (PqPolicy::PqRequired, CommitTrigger::PeriodicRefresh) => CommitType::Full,
 
             // Normal messages never commit.
-            (
-                PqPolicy::PqConfidentiality | PqPolicy::PqRequired,
-                CommitTrigger::NormalMessage,
-            ) => CommitType::None,
+            (PqPolicy::PqConfidentiality | PqPolicy::PqRequired, CommitTrigger::NormalMessage) => {
+                CommitType::None
+            }
         }
     }
 
@@ -281,10 +280,7 @@ mod tests {
     fn requires_full_matches_required_commit_type() {
         for &policy in ALL_POLICIES {
             for &trigger in ALL_TRIGGERS {
-                let expect_full = matches!(
-                    policy.required_commit_type(trigger),
-                    CommitType::Full
-                );
+                let expect_full = matches!(policy.required_commit_type(trigger), CommitType::Full);
                 assert_eq!(
                     policy.requires_full(trigger),
                     expect_full,
@@ -298,10 +294,8 @@ mod tests {
     fn allows_partial_matches_required_commit_type() {
         for &policy in ALL_POLICIES {
             for &trigger in ALL_TRIGGERS {
-                let expect_partial = matches!(
-                    policy.required_commit_type(trigger),
-                    CommitType::Partial
-                );
+                let expect_partial =
+                    matches!(policy.required_commit_type(trigger), CommitType::Partial);
                 assert_eq!(
                     policy.allows_partial(trigger),
                     expect_partial,

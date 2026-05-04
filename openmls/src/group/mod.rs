@@ -22,10 +22,12 @@ pub(crate) mod public_group;
 
 // Public — KChat orchestration layer
 pub mod apq_commit;
+pub mod apq_resync;
 pub mod conversation_upgrade;
 pub mod kchat_conversation;
 pub mod no_downgrade;
 pub mod pq_policy;
+pub mod reinit_upgrade;
 
 // Public
 pub use errors::*;
@@ -46,13 +48,21 @@ pub use apq_commit::{
     prepare_full_commit, prepare_partial_commit, ApqCommitError, FullCommitResult,
     PartialCommitResult,
 };
+pub use apq_resync::{
+    detect_desync, force_resync, resync_from_pq, resync_from_t, ApqResyncError, DesyncReport,
+    DesyncStatus, ResyncResult, MAX_EPOCH_DRIFT,
+};
 pub use conversation_upgrade::{select_conversation_mode, ConversationUpgradeError};
-pub use kchat_conversation::{KChatConversationError, KChatMlsConversation};
+pub use kchat_conversation::{ApqBootstrapError, KChatConversationError, KChatMlsConversation};
 pub use no_downgrade::{
     validate_apq_info_change, validate_ciphersuite_pin, validate_epoch_consistency,
     validate_joiner_key_package, validate_mode_change, ConversationSecurityState, DowngradeError,
 };
 pub use pq_policy::{CommitTrigger, CommitType, PqPolicy};
+pub use reinit_upgrade::{
+    commit_reinit, complete_reinit, propose_reinit, ReInitCommit, ReInitError, ReInitPlan,
+    ReInitResumption,
+};
 
 // Private
 #[cfg(feature = "fork-resolution")]

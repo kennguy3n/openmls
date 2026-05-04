@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — Complete | Phase 1–2 / 5–6 — In progress (~25%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~30%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
@@ -104,6 +104,17 @@ standards-track upgrade path:
 Definition of done: existing 1:1 and small groups whose members are all
 PQ-capable can be upgraded to PQ via `ReInit` without losing message history.
 
+**Implementation note (2026-05-04):** the ReInit upgrade flow has landed
+at
+[`openmls/src/group/reinit_upgrade.rs`](./openmls/src/group/reinit_upgrade.rs).
+`propose_reinit` builds the proposal and rejects same-suite transitions
+and mode downgrades, `commit_reinit` stages and merges the ReInit
+commit (transitioning the old group to `Inactive`), and
+`complete_reinit` derives the Resumption(ReInit) PSK via the MLS
+exporter (`REINIT_PSK_LABEL = "kchat-reinit-psk"`, 32 bytes),
+stores the `PreSharedKeyId`, and returns it for the new-group
+Welcome.
+
 ## Phase 4 — Upgrade Larger Groups Using APQ Bootstrap
 
 For groups too large for a clean `ReInit` (or where APQ's per-message cost
@@ -124,6 +135,20 @@ For groups where all active devices are PQ-capable:
 
 Definition of done: larger groups can be upgraded in place without rebuilding
 membership, and after the first FULL commit both sessions are in lockstep.
+
+**Implementation note (2026-05-04):** the APQ bootstrap entrypoint
+`KChatMlsConversation::bootstrap_apq` has landed in
+[`openmls/src/group/kchat_conversation.rs`](./openmls/src/group/kchat_conversation.rs).
+It validates preconditions (conversation is not already APQ, has a T
+session, advertised PQ ciphersuite is non-classical, membership lists
+match), adds the T-group members to the supplied PQ group, derives the
+`apq_psk` from the PQ session via the MLS exporter
+(`APQ_PSK_LABEL = "kchat-apq-psk"`, 32 bytes), creates the linking
+`ApqInfo`, emits an `ApqWelcome` envelope, and updates the conversation
+state with the new PQ session and APQ mode/policy. Recovery from a
+missed half of a FULL commit pair is handled in
+[`openmls/src/group/apq_resync.rs`](./openmls/src/group/apq_resync.rs)
+(`detect_desync`, `resync_from_pq`, `resync_from_t`, `force_resync`).
 
 ## Phase 5 — Operate with FULL/PARTIAL Policy
 
@@ -154,8 +179,11 @@ landed at
 the table above for every `CommitTrigger`. The `prepare_full_commit` /
 `prepare_partial_commit` skeletons in
 [`openmls/src/group/apq_commit.rs`](./openmls/src/group/apq_commit.rs)
-consume the policy decision and validate preconditions (mode, in-flight
-FULL commit) before invoking the still-stubbed live commit logic.
+are wired against `MlsGroup::commit_builder`. `prepare_full_commit`
+drives the PQ commit first, derives `apq_psk` via the MLS exporter,
+stores the resulting `PreSharedKeyId`, and then drives the T commit
+with a PSK proposal. `prepare_partial_commit` drives a T-session-only
+commit when policy permits.
 
 ## Phase 6 — Enforce No-Downgrade Rules
 

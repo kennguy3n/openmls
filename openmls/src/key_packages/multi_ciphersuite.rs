@@ -261,8 +261,12 @@ mod tests {
             credential: BasicCredential::new("alice".into()).into(),
             signature_key: signer.public().into(),
         };
-        let result =
-            MultiCiphersuiteKeyPackages::generate_for_capability(&cap, &provider, &credential, &signer);
+        let result = MultiCiphersuiteKeyPackages::generate_for_capability(
+            &cap,
+            &provider,
+            &credential,
+            &signer,
+        );
         match result {
             Err(MultiCiphersuiteError::NoCiphersuites) => {}
             other => panic!("expected NoCiphersuites, got {other:?}"),
@@ -278,9 +282,13 @@ mod tests {
             credential: BasicCredential::new("alice".into()).into(),
             signature_key: signer.public().into(),
         };
-        let bundle =
-            MultiCiphersuiteKeyPackages::generate_for_capability(&cap, &provider, &credential, &signer)
-                .expect("generate succeeded");
+        let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+            &cap,
+            &provider,
+            &credential,
+            &signer,
+        )
+        .expect("generate succeeded");
 
         assert_eq!(bundle.len(), 2);
         for cs in &cap.classical_ciphersuites {
@@ -300,9 +308,13 @@ mod tests {
             credential: BasicCredential::new("alice".into()).into(),
             signature_key: signer.public().into(),
         };
-        let bundle =
-            MultiCiphersuiteKeyPackages::generate_for_capability(&cap, &provider, &credential, &signer)
-                .expect("generate succeeded");
+        let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+            &cap,
+            &provider,
+            &credential,
+            &signer,
+        )
+        .expect("generate succeeded");
 
         assert_eq!(bundle.classical_packages().len(), 2);
         assert_eq!(bundle.pq_packages().len(), 0);
@@ -348,9 +360,13 @@ mod tests {
             credential: BasicCredential::new("alice".into()).into(),
             signature_key: signer.public().into(),
         };
-        let bundle =
-            MultiCiphersuiteKeyPackages::generate_for_capability(&cap, &provider, &credential, &signer)
-                .expect("generate succeeded");
+        let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+            &cap,
+            &provider,
+            &credential,
+            &signer,
+        )
+        .expect("generate succeeded");
 
         let mut suites = bundle.all_ciphersuites();
         suites.sort_by_key(|cs| *cs as u16);
@@ -368,11 +384,159 @@ mod tests {
             credential: BasicCredential::new("alice".into()).into(),
             signature_key: signer.public().into(),
         };
-        let bundle =
-            MultiCiphersuiteKeyPackages::generate_for_capability(&cap, &provider, &credential, &signer)
-                .expect("generate succeeded");
+        let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+            &cap,
+            &provider,
+            &credential,
+            &signer,
+        )
+        .expect("generate succeeded");
         let cs = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
         let kp = bundle.key_package(cs).expect("kp present");
         assert_eq!(kp.ciphersuite(), cs);
+    }
+
+    /// X-Wing-gated coverage of multi-ciphersuite KeyPackage generation
+    /// using the libcrux PQ provider. PHASES.md Phase 1.
+    #[cfg(feature = "xwing")]
+    mod xwing_provider_tests {
+        use super::*;
+        use openmls_libcrux_crypto::Provider as LibcruxProvider;
+
+        fn pq_capability() -> DeviceCapability {
+            DeviceCapability::new(
+                1,
+                vec![Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519],
+                vec![Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519],
+                true,
+                false,
+                "libcrux".into(),
+            )
+        }
+
+        #[test]
+        fn libcrux_generates_pq_key_packages_for_xwing() {
+            let cap = pq_capability();
+            let provider = LibcruxProvider::default();
+            let signer = SignatureKeyPair::new(SignatureScheme::ED25519).expect("keygen");
+            let credential = CredentialWithKey {
+                credential: BasicCredential::new("alice".into()).into(),
+                signature_key: signer.public().into(),
+            };
+            let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+                &cap,
+                &provider,
+                &credential,
+                &signer,
+            )
+            .expect("generate succeeded");
+
+            // Both classical + PQ KP must be present.
+            assert_eq!(bundle.len(), 2);
+            assert_eq!(bundle.pq_packages().len(), 1);
+            assert_eq!(bundle.classical_packages().len(), 1);
+            assert!(bundle
+                .key_package(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519)
+                .is_some());
+        }
+
+        #[test]
+        fn xwing_key_package_is_significantly_larger_than_classical() {
+            // ARCHITECTURE.md docs ~2669 bytes for X-Wing KPs vs ~299
+            // for classical. We assert the size *ratio* rather than
+            // absolute bytes so this stays robust to encoding tweaks.
+            let cap = pq_capability();
+            let provider = LibcruxProvider::default();
+            let signer = SignatureKeyPair::new(SignatureScheme::ED25519).expect("keygen");
+            let credential = CredentialWithKey {
+                credential: BasicCredential::new("alice".into()).into(),
+                signature_key: signer.public().into(),
+            };
+            let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+                &cap,
+                &provider,
+                &credential,
+                &signer,
+            )
+            .expect("generate succeeded");
+
+            use tls_codec::Serialize as _;
+            let classical_cs = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+            let xwing_cs = Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519;
+            let classical_kp = bundle.key_package(classical_cs).expect("classical KP");
+            let xwing_kp = bundle.key_package(xwing_cs).expect("xwing KP");
+            let classical_bytes = classical_kp
+                .tls_serialize_detached()
+                .expect("ser classical");
+            let xwing_bytes = xwing_kp.tls_serialize_detached().expect("ser xwing");
+            assert!(
+                xwing_bytes.len() > classical_bytes.len() * 4,
+                "X-Wing KP ({}) is not >>4x classical KP ({})",
+                xwing_bytes.len(),
+                classical_bytes.len()
+            );
+        }
+
+        #[test]
+        fn libcrux_per_device_cap_enforced_for_mixed_classical_pq() {
+            let cap = pq_capability();
+            let provider = LibcruxProvider::default();
+            let signer = SignatureKeyPair::new(SignatureScheme::ED25519).expect("keygen");
+            let credential = CredentialWithKey {
+                credential: BasicCredential::new("alice".into()).into(),
+                signature_key: signer.public().into(),
+            };
+            let result = MultiCiphersuiteKeyPackages::generate_for_capability_with_cap(
+                &cap,
+                &provider,
+                &credential,
+                &signer,
+                1, // below the 2 ciphersuites advertised
+            );
+            assert!(matches!(
+                result,
+                Err(MultiCiphersuiteError::TooManyCiphersuites { .. })
+            ));
+        }
+
+        #[test]
+        fn libcrux_pq_key_package_can_be_used_for_group_creation() {
+            use crate::group::{MlsGroup, MlsGroupCreateConfig};
+
+            let cap = pq_capability();
+            let provider = LibcruxProvider::default();
+            let signer = SignatureKeyPair::new(SignatureScheme::ED25519).expect("keygen");
+            let credential = CredentialWithKey {
+                credential: BasicCredential::new("alice".into()).into(),
+                signature_key: signer.public().into(),
+            };
+            let bundle = MultiCiphersuiteKeyPackages::generate_for_capability(
+                &cap,
+                &provider,
+                &credential,
+                &signer,
+            )
+            .expect("generate succeeded");
+            let xwing_cs = Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519;
+            let xwing_kp = bundle.key_package(xwing_cs).expect("xwing KP");
+
+            // Verify the KP is internally consistent and usable as a
+            // group founder. (We use the credential the KP was built
+            // with rather than a fresh one so the signature checks
+            // align.)
+            let group = MlsGroup::new(
+                &provider,
+                &signer,
+                &MlsGroupCreateConfig::builder()
+                    .ciphersuite(xwing_cs)
+                    .build(),
+                CredentialWithKey {
+                    credential: xwing_kp.leaf_node().credential().clone(),
+                    signature_key: xwing_kp.leaf_node().signature_key().clone(),
+                },
+            )
+            .expect("PQ group creation");
+            assert_eq!(group.ciphersuite(), xwing_cs);
+        }
     }
 }

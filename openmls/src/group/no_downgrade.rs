@@ -91,9 +91,7 @@ pub enum DowngradeError {
     },
     /// `to < highest_mode_ever`: the proposed mode is below the highest mode
     /// the conversation has ever reached.
-    #[error(
-        "mode change to {to:?} rejected: conversation has previously reached {highest:?}"
-    )]
+    #[error("mode change to {to:?} rejected: conversation has previously reached {highest:?}")]
     BelowHighestEver {
         /// Highest mode this conversation has ever reached.
         highest: SecurityMode,
@@ -124,9 +122,7 @@ pub enum DowngradeError {
     ApqInfoRemoval,
     /// APQInfo's mode changed without authorization (i.e. it was rewritten
     /// to a weaker mode).
-    #[error(
-        "APQInfo mode change from {old:?} to {new:?} rejected: not authorized as upgrade"
-    )]
+    #[error("APQInfo mode change from {old:?} to {new:?} rejected: not authorized as upgrade")]
     ApqInfoModeDowngrade {
         /// Previous APQInfo mode.
         old: SecurityMode,
@@ -134,9 +130,7 @@ pub enum DowngradeError {
         new: SecurityMode,
     },
     /// APQInfo's pinned ciphersuite was changed after bootstrap.
-    #[error(
-        "APQInfo ciphersuite change from {old:?} to {new:?} rejected: pinned at bootstrap"
-    )]
+    #[error("APQInfo ciphersuite change from {old:?} to {new:?} rejected: pinned at bootstrap")]
     ApqInfoCiphersuiteChange {
         /// Pinned ciphersuite.
         old: Ciphersuite,

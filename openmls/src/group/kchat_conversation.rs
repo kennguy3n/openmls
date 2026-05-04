@@ -17,10 +17,21 @@
 //! [`crate::group::apq_commit`](super::apq_commit), and the policy decisions
 //! live in [`crate::group::pq_policy`](super::pq_policy).
 
+use openmls_traits::random::OpenMlsRand;
+use openmls_traits::signatures::Signer;
+use openmls_traits::types::Ciphersuite;
+
 use crate::ciphersuite::SecurityMode;
-use crate::extensions::apq_info::ApqInfo;
+use crate::extensions::apq_info::{ApqInfo, ApqInfoError};
+use crate::framing::{MlsMessageBodyOut, MlsMessageOut};
+use crate::group::apq_commit::{APQ_PSK_ID_LENGTH, APQ_PSK_LABEL, APQ_PSK_LENGTH};
 use crate::group::mls_group::MlsGroup;
 use crate::group::pq_policy::PqPolicy;
+use crate::key_packages::KeyPackage;
+use crate::messages::apq_welcome::{ApqWelcome, ApqWelcomeError};
+use crate::messages::Welcome;
+use crate::schedule::psk::PreSharedKeyId;
+use crate::storage::OpenMlsProvider;
 
 /// Top-level KChat conversation — wraps one or two [`MlsGroup`]s plus the
 /// orchestration state needed to keep them in sync.
@@ -248,6 +259,242 @@ impl KChatMlsConversation {
     /// method only stores the value.
     pub fn set_apq_info(&mut self, apq_info: ApqInfo) {
         self.apq_info = Some(apq_info);
+    }
+
+    /// Bootstrap a Classical conversation into APQ.
+    ///
+    /// The caller supplies a freshly-created PQ [`MlsGroup`] (containing only
+    /// the local member) and one [`KeyPackage`] per **other** member of the
+    /// existing T session. This method:
+    ///
+    /// 1. Adds all peer members to the PQ session via
+    ///    [`MlsGroup::add_members`] and merges the resulting commit so the PQ
+    ///    session is operational at epoch 1.
+    /// 2. Derives the initial `apq_psk` from the PQ session via
+    ///    [`MlsGroup::export_secret`] using [`APQ_PSK_LABEL`] and the
+    ///    conversation ID, then stores the secret under a fresh
+    ///    [`PreSharedKeyId`] in the provider's PSK store.
+    /// 3. Builds an [`ApqInfo`] linking the two sessions at their current
+    ///    epochs and the requested security `apq_mode`.
+    /// 4. Returns an [`ApqWelcome`] envelope containing the PQ Welcome,
+    ///    the [`ApqInfo`], and the initial PSK ID for distribution to peers
+    ///    (no T-session Welcome — peers are already members of the T
+    ///    session).
+    /// 5. Updates the conversation in place: switches `mode`, installs the
+    ///    PQ group, installs the [`ApqInfo`], and replaces the [`PqPolicy`].
+    ///
+    /// The caller is responsible for actually delivering the [`ApqWelcome`]
+    /// to peers, then optionally invoking
+    /// [`crate::group::apq_commit::prepare_full_commit`] to bind the T
+    /// session to the PQ session at the next epoch.
+    ///
+    /// See [`PHASES.md`](../../../PHASES.md) Phase 4.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bootstrap_apq<P, S>(
+        &mut self,
+        mut pq_group: MlsGroup,
+        pq_key_packages: Vec<KeyPackage>,
+        apq_mode: SecurityMode,
+        apq_policy: PqPolicy,
+        provider: &P,
+        signer: &S,
+    ) -> Result<ApqWelcome, ApqBootstrapError>
+    where
+        P: OpenMlsProvider,
+        S: Signer,
+    {
+        // --- Preconditions ---------------------------------------------------
+        if !self.is_classical() {
+            return Err(ApqBootstrapError::AlreadyApq);
+        }
+        if self.t_group.is_none() {
+            return Err(ApqBootstrapError::NoTSession);
+        }
+        if matches!(apq_mode, SecurityMode::Classical) {
+            return Err(ApqBootstrapError::ClassicalApqMode);
+        }
+        if SecurityMode::from_ciphersuite(pq_group.ciphersuite()) == SecurityMode::Classical {
+            return Err(ApqBootstrapError::PqGroupHasClassicalCiphersuite {
+                ciphersuite: pq_group.ciphersuite(),
+            });
+        }
+        if pq_key_packages.is_empty() {
+            return Err(ApqBootstrapError::EmptyPqKeyPackages);
+        }
+        for kp in &pq_key_packages {
+            if kp.ciphersuite() != pq_group.ciphersuite() {
+                return Err(ApqBootstrapError::PqKeyPackageCiphersuiteMismatch {
+                    expected: pq_group.ciphersuite(),
+                    got: kp.ciphersuite(),
+                });
+            }
+        }
+
+        // PQ key packages must cover every *other* member of the T session.
+        // The creator of the PQ group is already in the PQ session as its
+        // sole leaf, so the count is `t_member_count - 1`.
+        let t_member_count = self
+            .t_group
+            .as_ref()
+            .expect("t_group present (precondition)")
+            .members()
+            .count();
+        if pq_key_packages.len() + 1 != t_member_count {
+            return Err(ApqBootstrapError::MembershipMismatch {
+                t_count: t_member_count,
+                pq_count: pq_key_packages.len() + 1,
+            });
+        }
+
+        // --- 1. Add peers to PQ session, merge commit -----------------------
+        let (_pq_commit, pq_welcome_msg, _pq_group_info) = pq_group
+            .add_members(provider, signer, &pq_key_packages)
+            .map_err(|e| ApqBootstrapError::AddMembersFailed(format!("{e}")))?;
+        pq_group
+            .merge_pending_commit(provider)
+            .map_err(|e| ApqBootstrapError::MergeFailed(format!("{e}")))?;
+
+        let pq_welcome = welcome_from_message(pq_welcome_msg)?;
+
+        // --- 2. Derive initial apq_psk and store ----------------------------
+        let apq_psk = pq_group
+            .export_secret(
+                provider.crypto(),
+                APQ_PSK_LABEL,
+                &self.conversation_id,
+                APQ_PSK_LENGTH,
+            )
+            .map_err(|e| ApqBootstrapError::ExportSecretFailed(format!("{e}")))?;
+
+        let psk_id_bytes = provider
+            .rand()
+            .random_vec(APQ_PSK_ID_LENGTH)
+            .map_err(|e| ApqBootstrapError::RandomGenerationFailed(format!("psk_id: {e}")))?;
+        let psk_nonce = provider
+            .rand()
+            .random_vec(pq_group.ciphersuite().hash_length())
+            .map_err(|e| ApqBootstrapError::RandomGenerationFailed(format!("psk_nonce: {e}")))?;
+        let initial_apq_psk_id = PreSharedKeyId::external(psk_id_bytes, psk_nonce);
+        initial_apq_psk_id
+            .store(provider, &apq_psk)
+            .map_err(|e| ApqBootstrapError::PskStoreFailed(format!("{e}")))?;
+
+        // --- 3. Build ApqInfo -----------------------------------------------
+        let t_group = self
+            .t_group
+            .as_ref()
+            .expect("t_group present (precondition)");
+        let apq_info = ApqInfo::new(
+            t_group.group_id().clone(),
+            pq_group.group_id().clone(),
+            t_group.epoch().as_u64(),
+            pq_group.epoch().as_u64(),
+            t_group.ciphersuite(),
+            pq_group.ciphersuite(),
+            apq_mode,
+        );
+        apq_info
+            .validate()
+            .map_err(ApqBootstrapError::InvalidApqInfo)?;
+
+        // --- 4. Build ApqWelcome (no T welcome — peers already in T) -------
+        let apq_welcome = ApqWelcome {
+            t_welcome: None,
+            pq_welcome,
+            apq_info: apq_info.clone(),
+            initial_apq_psk_id: Some(initial_apq_psk_id),
+        };
+        apq_welcome
+            .validate()
+            .map_err(ApqBootstrapError::ApqWelcomeInvalid)?;
+
+        // --- 5. Mutate conversation -----------------------------------------
+        self.mode = apq_mode;
+        self.pq_group = Some(pq_group);
+        self.apq_info = Some(apq_info);
+        self.pq_policy = apq_policy;
+
+        Ok(apq_welcome)
+    }
+}
+
+/// Errors returned by [`KChatMlsConversation::bootstrap_apq`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ApqBootstrapError {
+    /// Conversation is already APQ (or DIRECT_PQ).
+    #[error(
+        "conversation is already APQ — bootstrap_apq must be called on a Classical conversation"
+    )]
+    AlreadyApq,
+    /// Conversation has no T session.
+    #[error("conversation has no T session")]
+    NoTSession,
+    /// Caller passed `SecurityMode::Classical` as the bootstrap mode.
+    #[error("bootstrap_apq requires a non-classical SecurityMode")]
+    ClassicalApqMode,
+    /// PQ group's ciphersuite is classical (i.e. not actually PQ).
+    #[error("PQ group ciphersuite {ciphersuite:?} is not a post-quantum ciphersuite")]
+    PqGroupHasClassicalCiphersuite {
+        /// The classical ciphersuite that was supplied.
+        ciphersuite: Ciphersuite,
+    },
+    /// `pq_key_packages` was empty (must contain at least one peer).
+    #[error("pq_key_packages is empty — bootstrap_apq requires at least one peer KeyPackage")]
+    EmptyPqKeyPackages,
+    /// One of the supplied PQ KeyPackages has a different ciphersuite than
+    /// the PQ group.
+    #[error("PQ KeyPackage ciphersuite mismatch: expected {expected:?} got {got:?}")]
+    PqKeyPackageCiphersuiteMismatch {
+        /// Ciphersuite of the PQ group.
+        expected: Ciphersuite,
+        /// Ciphersuite of the offending KeyPackage.
+        got: Ciphersuite,
+    },
+    /// `pq_key_packages.len() + 1` (creator) does not match the T session's
+    /// member count.
+    #[error("membership mismatch: T session has {t_count} members but PQ side covers {pq_count}")]
+    MembershipMismatch {
+        /// Number of members in the T session.
+        t_count: usize,
+        /// Number of members the PQ side would have after the bootstrap
+        /// add_members commit (i.e. supplied KPs + creator).
+        pq_count: usize,
+    },
+    /// [`MlsGroup::add_members`] failed on the PQ session.
+    #[error("PQ session add_members failed: {0}")]
+    AddMembersFailed(String),
+    /// Merging the PQ session's pending commit failed.
+    #[error("PQ session merge_pending_commit failed: {0}")]
+    MergeFailed(String),
+    /// [`MlsGroup::export_secret`] failed on the PQ session.
+    #[error("PQ session export_secret failed: {0}")]
+    ExportSecretFailed(String),
+    /// Random byte generation failed.
+    #[error("random generation failed: {0}")]
+    RandomGenerationFailed(String),
+    /// Persisting the derived `apq_psk` in the provider's PSK store failed.
+    #[error("apq_psk store failed: {0}")]
+    PskStoreFailed(String),
+    /// `add_members` returned an [`MlsMessageOut`] whose body was not a
+    /// [`Welcome`]. This should not happen in practice — it indicates an
+    /// internal contract violation.
+    #[error("PQ add_members returned a non-Welcome MlsMessageOut")]
+    UnexpectedAddMembersOutput,
+    /// Constructed [`ApqInfo`] failed validation.
+    #[error("APQInfo validation failed: {0}")]
+    InvalidApqInfo(ApqInfoError),
+    /// Constructed [`ApqWelcome`] failed validation.
+    #[error("ApqWelcome validation failed: {0}")]
+    ApqWelcomeInvalid(ApqWelcomeError),
+}
+
+/// Pull a [`Welcome`] out of an [`MlsMessageOut`]. Returns
+/// [`ApqBootstrapError::UnexpectedAddMembersOutput`] if the message body is
+/// not a Welcome.
+fn welcome_from_message(msg: MlsMessageOut) -> Result<Welcome, ApqBootstrapError> {
+    match msg.body {
+        MlsMessageBodyOut::Welcome(w) => Ok(w),
+        _ => Err(ApqBootstrapError::UnexpectedAddMembersOutput),
     }
 }
 
