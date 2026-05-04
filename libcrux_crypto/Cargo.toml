@@ -29,6 +29,14 @@ hpke-rs-crypto = { version = "0.6.1" }
 hpke-rs-libcrux = { version = "0.6.1" }
 
 [features]
+# Enable the X-Wing draft-06 hybrid KEM ciphersuite
+# (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`, draft codepoint 0x004D).
+#
+# The X-Wing combiner is still an IETF/CFRG draft and uses a draft codepoint
+# that will change once IANA assigns a final value, so it is gated behind an
+# explicit feature flag to make sure it cannot be selected accidentally in
+# production builds.
+xwing = []
 extensions-draft-08 = [
     "openmls_traits/extensions-draft-08",
     "openmls_memory_storage/extensions-draft-08",

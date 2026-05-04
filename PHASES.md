@@ -1,11 +1,14 @@
 # KChat Quantum Resistance Migration Phases
 
+**Current status: Phase 0 — In Progress (~55%)**
+
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
 deployment. Each phase has a clear precondition and a clear definition of
 done; later phases assume earlier phases are deployed.
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the underlying model and
+See [`PROPOSAL.md`](./PROPOSAL.md) for the high-level product proposal,
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) for the underlying model, and
 [`PROGRESS.md`](./PROGRESS.md) for current status.
 
 ## Phase 0 — Make Clients Crypto-Agile

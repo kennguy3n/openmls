@@ -1,6 +1,28 @@
 //! # OpenMLS Types
 //!
 //! This module holds a number of types that are needed by the traits.
+//!
+//! ## Draft vs. final IANA codepoints
+//!
+//! Some ciphersuites, KEM types, and signature schemes in this module are
+//! defined against **draft** or **private** codepoints. These codepoints are
+//! placeholders allocated for ongoing IETF / NIST drafts (e.g. X-Wing,
+//! ML-KEM, ML-DSA, the IETF MLS PQ ciphersuite draft) and **will change**
+//! once IANA assigns final values.
+//!
+//! Wire-level interop with future deployments therefore requires migrating
+//! from draft codepoints to their final IANA-assigned values — silently
+//! reusing a draft value as if it were final is a downgrade hazard. To make
+//! this distinction visible at the type level, the [`Ciphersuite`],
+//! [`HpkeKemType`], and [`SignatureScheme`] enums each expose an
+//! `is_draft_codepoint()` method that returns `true` for any variant whose
+//! numeric value is still provisional. Callers that need final-only behaviour
+//! (production deployments, no-downgrade enforcement, telemetry that flags
+//! draft suites) should consult these methods.
+//!
+//! See [`PROGRESS.md`](https://github.com/kennguy3n/openmls/blob/main/PROGRESS.md)
+//! and [`ARCHITECTURE.md`](https://github.com/kennguy3n/openmls/blob/main/ARCHITECTURE.md)
+//! for the migration plan and the current set of draft suites.
 
 use std::ops::Deref;
 
@@ -103,6 +125,52 @@ pub enum SignatureScheme {
     ED25519 = 0x0807,
     /// ED448
     ED448 = 0x0808,
+    /// ML-DSA-44 (FIPS 204) — post-quantum digital signature, security level 2.
+    ///
+    /// **DRAFT** — codepoint `0x0904` is a private/experimental value used as
+    /// a placeholder until IANA assigns a final value for ML-DSA in the
+    /// IETF MLS PQ ciphersuite draft. Migrate consumers to the final
+    /// codepoint once it is published.
+    MLDSA44 = 0x0904,
+    /// ML-DSA-65 (FIPS 204) — post-quantum digital signature, security level 3.
+    ///
+    /// **DRAFT** — codepoint `0x0905` is a private/experimental value used as
+    /// a placeholder until IANA assigns a final value for ML-DSA in the
+    /// IETF MLS PQ ciphersuite draft. Migrate consumers to the final
+    /// codepoint once it is published.
+    MLDSA65 = 0x0905,
+    /// ML-DSA-87 (FIPS 204) — post-quantum digital signature, security level 5.
+    ///
+    /// **DRAFT** — codepoint `0x0906` is a private/experimental value used as
+    /// a placeholder until IANA assigns a final value for ML-DSA in the
+    /// IETF MLS PQ ciphersuite draft. Migrate consumers to the final
+    /// codepoint once it is published.
+    MLDSA87 = 0x0906,
+}
+
+impl SignatureScheme {
+    /// Returns `true` if this signature scheme uses a draft / private
+    /// codepoint that has not yet been assigned a final IANA value.
+    ///
+    /// Draft codepoints MUST be migrated to their final values once IANA
+    /// assigns them; deployments that treat a draft codepoint as final risk
+    /// silent interop / downgrade failures.
+    pub const fn is_draft_codepoint(&self) -> bool {
+        matches!(
+            self,
+            SignatureScheme::MLDSA44 | SignatureScheme::MLDSA65 | SignatureScheme::MLDSA87
+        )
+    }
+
+    /// Returns `true` if this signature scheme is a post-quantum scheme.
+    ///
+    /// Currently this is the ML-DSA family (FIPS 204).
+    pub const fn is_post_quantum(&self) -> bool {
+        matches!(
+            self,
+            SignatureScheme::MLDSA44 | SignatureScheme::MLDSA65 | SignatureScheme::MLDSA87
+        )
+    }
 }
 
 impl TryFrom<u16> for SignatureScheme {
@@ -115,6 +183,9 @@ impl TryFrom<u16> for SignatureScheme {
             0x0603 => Ok(SignatureScheme::ECDSA_SECP521R1_SHA512),
             0x0807 => Ok(SignatureScheme::ED25519),
             0x0808 => Ok(SignatureScheme::ED448),
+            0x0904 => Ok(SignatureScheme::MLDSA44),
+            0x0905 => Ok(SignatureScheme::MLDSA65),
+            0x0906 => Ok(SignatureScheme::MLDSA87),
             _ => Err(format!("Unsupported SignatureScheme: {value}")),
         }
     }
@@ -182,8 +253,26 @@ pub enum HpkeKemType {
     /// DH KEM on x448
     DhKem448 = 0x0021,
 
-    /// XWing combiner for ML-KEM and X25519
+    /// **DRAFT** — X-Wing combiner for ML-KEM-768 and X25519.
+    ///
+    /// Codepoint `0x004D` is a draft value (see
+    /// [`draft-connolly-cfrg-xwing-kem`](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/))
+    /// and **will change** when IANA assigns the final codepoint. Wire-level
+    /// interop with future deployments requires migrating to that final
+    /// value.
     XWingKemDraft6 = 0x004D,
+}
+
+impl HpkeKemType {
+    /// Returns `true` if this KEM type uses a draft / private codepoint
+    /// that has not yet been assigned a final IANA value.
+    ///
+    /// Draft codepoints MUST be migrated to their final values once IANA
+    /// assigns them; deployments that treat a draft codepoint as final risk
+    /// silent interop / downgrade failures.
+    pub const fn is_draft_codepoint(&self) -> bool {
+        matches!(self, HpkeKemType::XWingKemDraft6)
+    }
 }
 
 /// KDF Types for HPKE
@@ -397,8 +486,32 @@ pub enum Ciphersuite {
     /// DH KEM P384 | AES-GCM 256 | SHA2-384 | EcDSA P384
     MLS_256_DHKEMP384_AES256GCM_SHA384_P384 = 0x0007,
 
-    /// X-WING KEM draft-01 | Chacha20Poly1305 | SHA2-256 | Ed25519
+    /// **DRAFT** — X-Wing KEM (ML-KEM-768 + X25519) | Chacha20Poly1305 | SHA2-256 | Ed25519.
+    ///
+    /// Codepoint `0x004D` is a draft value used while the IETF MLS PQ
+    /// ciphersuite draft and the X-Wing combiner draft are still in flight,
+    /// and **will change** when IANA assigns the final codepoint. Wire-level
+    /// interop with future deployments requires migrating to that final
+    /// value.
     MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 = 0x004D,
+}
+
+impl Ciphersuite {
+    /// Returns `true` if this ciphersuite uses a draft / private codepoint
+    /// that has not yet been assigned a final IANA value.
+    ///
+    /// Draft codepoints MUST be migrated to their final values once IANA
+    /// assigns them; deployments that treat a draft codepoint as final risk
+    /// silent interop / downgrade failures. Currently this only applies to
+    /// the X-Wing draft suite, but additional draft suites (ML-KEM hybrid,
+    /// pure ML-KEM, ML-DSA-bearing) will land here as the IETF MLS PQ
+    /// ciphersuite draft progresses.
+    pub const fn is_draft_codepoint(&self) -> bool {
+        matches!(
+            self,
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+        )
+    }
 }
 
 impl core::fmt::Display for Ciphersuite {
@@ -629,5 +742,140 @@ impl Ciphersuite {
     #[inline]
     pub const fn aead_nonce_length(&self) -> usize {
         self.aead_algorithm().nonce_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------- Ciphersuite::is_draft_codepoint -------
+
+    #[test]
+    fn test_xwing_is_draft() {
+        assert!(
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519.is_draft_codepoint(),
+            "X-Wing must report as a draft codepoint"
+        );
+    }
+
+    #[test]
+    fn test_classical_not_draft() {
+        let classical = [
+            Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+            Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256,
+            Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+            Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448,
+            Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521,
+            Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448,
+            Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384,
+        ];
+        for suite in classical {
+            assert!(
+                !suite.is_draft_codepoint(),
+                "Classical ciphersuite {suite:?} must not report as a draft codepoint"
+            );
+        }
+    }
+
+    // ------- HpkeKemType::is_draft_codepoint -------
+
+    #[test]
+    fn test_xwing_kem_is_draft() {
+        assert!(
+            HpkeKemType::XWingKemDraft6.is_draft_codepoint(),
+            "XWingKemDraft6 must report as a draft codepoint"
+        );
+    }
+
+    #[test]
+    fn test_classical_kem_not_draft() {
+        let classical = [
+            HpkeKemType::DhKemP256,
+            HpkeKemType::DhKemP384,
+            HpkeKemType::DhKemP521,
+            HpkeKemType::DhKem25519,
+            HpkeKemType::DhKem448,
+        ];
+        for kem in classical {
+            assert!(
+                !kem.is_draft_codepoint(),
+                "Classical KEM {kem:?} must not report as a draft codepoint"
+            );
+        }
+    }
+
+    // ------- SignatureScheme: ML-DSA -------
+
+    #[test]
+    fn test_mldsa_signature_schemes_exist() {
+        assert_eq!(SignatureScheme::MLDSA44 as u16, 0x0904);
+        assert_eq!(SignatureScheme::MLDSA65 as u16, 0x0905);
+        assert_eq!(SignatureScheme::MLDSA87 as u16, 0x0906);
+    }
+
+    #[test]
+    fn test_mldsa_try_from_u16() {
+        assert_eq!(
+            SignatureScheme::try_from(0x0904u16).unwrap(),
+            SignatureScheme::MLDSA44
+        );
+        assert_eq!(
+            SignatureScheme::try_from(0x0905u16).unwrap(),
+            SignatureScheme::MLDSA65
+        );
+        assert_eq!(
+            SignatureScheme::try_from(0x0906u16).unwrap(),
+            SignatureScheme::MLDSA87
+        );
+    }
+
+    #[test]
+    fn test_mldsa_is_draft() {
+        for scheme in [
+            SignatureScheme::MLDSA44,
+            SignatureScheme::MLDSA65,
+            SignatureScheme::MLDSA87,
+        ] {
+            assert!(
+                scheme.is_draft_codepoint(),
+                "ML-DSA scheme {scheme:?} must report as a draft codepoint"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mldsa_is_post_quantum() {
+        for scheme in [
+            SignatureScheme::MLDSA44,
+            SignatureScheme::MLDSA65,
+            SignatureScheme::MLDSA87,
+        ] {
+            assert!(
+                scheme.is_post_quantum(),
+                "ML-DSA scheme {scheme:?} must report as post-quantum"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classical_signature_schemes_not_draft_or_pq() {
+        let classical = [
+            SignatureScheme::ECDSA_SECP256R1_SHA256,
+            SignatureScheme::ECDSA_SECP384R1_SHA384,
+            SignatureScheme::ECDSA_SECP521R1_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ];
+        for scheme in classical {
+            assert!(
+                !scheme.is_draft_codepoint(),
+                "Classical signature scheme {scheme:?} must not be draft"
+            );
+            assert!(
+                !scheme.is_post_quantum(),
+                "Classical signature scheme {scheme:?} must not be post-quantum"
+            );
+        }
     }
 }

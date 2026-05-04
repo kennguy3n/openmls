@@ -17,6 +17,90 @@ _OpenMLS_ is a Rust implementation of the Messaging Layer Security (MLS) protoco
 It is a software library that can serve as a building block in applications that require end-to-end encryption of messages.
 It has a safe and easy-to-use interface that hides the complexity of the underlying cryptographic operations.
 
+## About this fork
+
+This is the **KChat PQ-resistant fork** of OpenMLS. We track upstream OpenMLS
+as a foundation and layer in post-quantum and PQ/classical hybrid ciphersuites
+plus orchestration scaffolding (APQ-MLS combiner, draft-codepoint helpers,
+ML-DSA enum support) needed to ship quantum-resistant E2E encryption to KChat
+at production scale. See [`PROPOSAL.md`](./PROPOSAL.md) for the high-level
+product proposal, [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the technical
+design, [`PHASES.md`](./PHASES.md) for the staged migration plan, and
+[`PROGRESS.md`](./PROGRESS.md) for the current implementation status.
+
+## Quick start
+
+```bash
+git clone https://github.com/kennguy3n/openmls.git
+cd openmls
+
+# Default workspace build (classical only, no PQ).
+cargo build --workspace
+
+# Build the openmls crate with the libcrux PQ provider.
+cargo build -p openmls --features libcrux-provider
+
+# Opt in to the X-Wing draft-06 hybrid PQ ciphersuite.
+# `xwing` implies `libcrux-provider`. The codepoint 0x004D is a draft and
+# will change once IANA assigns the final value.
+cargo build -p openmls --features xwing
+```
+
+## Project structure
+
+- [`openmls/`](./openmls) — main `openmls` crate; MLS protocol logic, group
+  management, and the public API.
+- [`traits/`](./traits) — `openmls_traits`: provider trait, ciphersuite,
+  KEM, signature, and HPKE type definitions consumed by the rest of the
+  workspace.
+- [`openmls_rust_crypto/`](./openmls_rust_crypto) — RustCrypto-backed
+  classical provider. PQ ciphersuites return
+  `CryptoError::UnsupportedCiphersuite`.
+- [`libcrux_crypto/`](./libcrux_crypto) — libcrux-backed provider. Adds
+  X-Wing under the `xwing` feature flag; ML-KEM/ML-DSA tracked as upstream
+  libcrux gains support.
+- [`memory_storage/`](./memory_storage), [`sqlite_storage/`](./sqlite_storage)
+  — storage providers.
+- [`basic_credential/`](./basic_credential) — a minimal credential
+  implementation used in tests and examples.
+- [`cli/`](./cli) — command-line client / demo.
+- [`delivery-service/`](./delivery-service) — a reference delivery-service
+  implementation (`ds`, `ds-lib`).
+- [`interop_client/`](./interop_client) — interop test client used against
+  the IETF MLS interop matrix.
+- [`openmls_test/`](./openmls_test), [`fuzz/`](./fuzz),
+  [`openmls-wasm/`](./openmls-wasm) — test harnesses, fuzz targets, and
+  the wasm bindings crate.
+
+## Running tests
+
+```bash
+# Whole workspace (classical only).
+cargo test --workspace
+
+# Individual provider crates.
+cargo test -p openmls_rust_crypto
+cargo test -p openmls_libcrux_crypto                       # without xwing
+cargo test -p openmls_libcrux_crypto --features xwing      # with xwing
+
+# Trait-level tests (draft-codepoint helpers, ML-DSA enum, ...).
+cargo test -p openmls_traits
+
+# Lint + format (matches CI).
+cargo fmt --all -- --check
+cargo clippy --workspace --tests -- -D warnings
+```
+
+## Documentation index
+
+- [`PROPOSAL.md`](./PROPOSAL.md) — product proposal: goal, problem,
+  solution overview, success criteria.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — standards basis, security modes,
+  APQ-MLS combiner, decision matrix, ciphersuite roadmap.
+- [`PHASES.md`](./PHASES.md) — phased migration plan and rollout gates.
+- [`PROGRESS.md`](./PROGRESS.md) — implementation status, version targets,
+  changelog, known gaps.
+
 ## Supported ciphersuites
 
 ### Classical (production)
@@ -32,12 +116,16 @@ still tracking IETF/NIST drafts and are gated behind the libcrux provider; the
 RustCrypto provider does **not** implement any PQ primitives.
 
 - **MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519** — X-Wing hybrid KEM
-  (ML-KEM-768 + X25519), draft codepoint `0x004D`, libcrux provider only.
-  Use only with the `libcrux-provider` feature; selecting this suite on the
-  RustCrypto provider currently **panics** (`unimplemented!`) — replacing
-  this with an `UnsupportedCiphersuite` error is tracked in
-  [`PROGRESS.md`](./PROGRESS.md). Provides HNDL-bridge confidentiality with
-  classical Ed25519 authenticity.
+  (ML-KEM-768 + X25519), **draft** codepoint `0x004D`, libcrux provider
+  only. Gated behind the `xwing` feature flag (which implies
+  `libcrux-provider`); the suite is hidden from
+  `supported_ciphersuites()` and rejected by `supports()` when the feature
+  is off. Selecting this suite on the RustCrypto provider returns
+  `CryptoError::UnsupportedCiphersuite` rather than panicking. Provides
+  HNDL-bridge confidentiality with classical Ed25519 authenticity. The
+  `0x004D` codepoint is a draft and will change once IANA assigns a final
+  value — see
+  [`Ciphersuite::is_draft_codepoint()`](./traits/src/types.rs).
 
 Planned, tracking the
 [IETF MLS PQ ciphersuite draft](https://datatracker.ietf.org/doc/draft-ietf-mls-mls-pq-cs/)
@@ -47,6 +135,10 @@ Planned, tracking the
   `PQ_CONFIDENTIALITY` deployments.
 - Pure ML-KEM suites (FIPS 203) once the IETF draft stabilizes.
 - ML-DSA signature suites (FIPS 204) for `PQ_AUTHENTICITY` deployments.
+  The `SignatureScheme` enum already exposes `MLDSA44`, `MLDSA65`, and
+  `MLDSA87` variants with draft codepoints (`0x0904`–`0x0906`); both
+  providers reject them today, and provider implementations land once
+  upstream libcrux gains ML-DSA support.
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`PHASES.md`](./PHASES.md), and
 [`PROGRESS.md`](./PROGRESS.md) for the full roadmap.
@@ -123,13 +215,15 @@ details.
 
 - **libcrux** ([`libcrux_crypto`](./libcrux_crypto)) — formally verified PQ-capable
   provider. This is the provider used for any of the post-quantum or hybrid
-  ciphersuites listed above (currently X-Wing draft-06; ML-KEM and ML-DSA as
-  the IETF MLS PQ draft and libcrux gain support).
+  ciphersuites listed above (currently X-Wing draft-06 behind the `xwing`
+  feature; ML-KEM and ML-DSA as the IETF MLS PQ draft and libcrux gain
+  support).
 - **RustCrypto** ([`openmls_rust_crypto`](./openmls_rust_crypto)) — pure-Rust
   classical provider. **Does not support any PQ ciphersuite.** Selecting a PQ
-  ciphersuite (e.g. `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`) with this
-  provider must return an `UnsupportedCiphersuite` error rather than panic;
-  hardening this surface is tracked in [`PROGRESS.md`](./PROGRESS.md).
+  ciphersuite (e.g. `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`) with
+  this provider returns `CryptoError::UnsupportedCiphersuite` instead of
+  panicking, and `signature_key_gen` rejects the ML-DSA `SignatureScheme`
+  variants with `CryptoError::UnsupportedSignatureScheme`.
 
 ## Features
 OpenMLS provides the following features
@@ -137,6 +231,10 @@ OpenMLS provides the following features
 - **extensions-draft-08**: enable features defined in [MLS extensions draft-08](https://messaginglayersecurity.rocks/mls-extensions/draft-ietf-mls-extensions.html)
 - **fork-resolution**: helper functionality for [resolving forks](https://book.openmls.tech/user_manual/fork-resolution.html).
 - **js**: enable compilation to wasm
+- **xwing**: enable the X-Wing draft-06 hybrid KEM ciphersuite
+  (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`). Implies
+  `libcrux-provider` and is opt-in because the `0x004D` codepoint is a
+  draft.
 
 <details>
 <summary>Developer features</summary>
