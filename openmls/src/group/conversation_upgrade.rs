@@ -111,25 +111,29 @@ pub fn select_conversation_mode_with_emitter(
     let result = select_conversation_mode(peer_capabilities);
     if let Err(ConversationUpgradeError::NoCommonCiphersuite { mode }) = &result {
         // Emit one UnsupportedCiphersuite event per *advertised* PQ
-        // ciphersuite that the chosen mode could not honour. This
-        // gives dashboards visibility into which suites peers expected.
+        // ciphersuite that the chosen mode could not honour. We emit
+        // for every PQ suite at or below the target mode, since any
+        // such suite was advertised but not honoured by the final
+        // selection. Suites *above* the target mode are not flagged —
+        // those are correctly excluded by `select_mode`'s "highest
+        // mode all peers support" rule, not by the per-suite filter.
+        let mut emitted = 0_usize;
         for cap in peer_capabilities {
             for cs in &cap.pq_ciphersuites {
-                if SecurityMode::from_ciphersuite(*cs) < *mode {
+                if SecurityMode::from_ciphersuite(*cs) <= *mode {
                     emitter.emit(PqTelemetryEvent::UnsupportedCiphersuite {
                         ciphersuite: *cs,
                         provider_id: provider_id.to_string(),
                     });
+                    emitted += 1;
                 }
             }
         }
         // Always emit at least one event so callers can pin the
-        // "selection failed" signal even when peers advertised no PQ
-        // suites at all.
-        if peer_capabilities
-            .iter()
-            .all(|c| c.pq_ciphersuites.is_empty())
-        {
+        // "selection failed" signal even when no per-suite event was
+        // produced above (e.g. peers advertised no PQ suites at all,
+        // or every advertised suite is *above* the target mode).
+        if emitted == 0 {
             emitter.emit(PqTelemetryEvent::UnsupportedCiphersuite {
                 ciphersuite: Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
                 provider_id: provider_id.to_string(),
@@ -273,5 +277,100 @@ mod tests {
         let refs: Vec<&DeviceCapability> = peers.iter().collect();
         let (mode, _cs) = select_conversation_mode(&refs).expect("single peer");
         assert_eq!(mode, SecurityMode::PqConfidentiality);
+    }
+
+    /// Regression test for the bug where
+    /// `select_conversation_mode_with_emitter` emitted zero events when
+    /// peers advertised disjoint PQ ciphersuites that all mapped to the
+    /// *same* target mode. The original implementation used a strict
+    /// `<` filter, missing same-mode suites entirely, and the fallback
+    /// only fired when every peer's PQ list was empty.
+    #[test]
+    fn with_emitter_emits_events_for_disjoint_same_mode_suites() {
+        use crate::group::pq_telemetry::InMemoryTelemetryEmitter;
+
+        // Peer A advertises X-Wing only; peer B advertises a hypothetical
+        // ML-KEM hybrid. Both map to PqConfidentiality. The intersection
+        // of PQ suites is empty, so `select_conversation_mode` returns
+        // `NoCommonCiphersuite { mode: PqConfidentiality }`. The bug
+        // would have produced zero telemetry events.
+        let peer_a = DeviceCapability::new(
+            1,
+            classical_suites(),
+            vec![Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519],
+            true,
+            false,
+            "libcrux".into(),
+        );
+        let peer_b = DeviceCapability::new(
+            1,
+            classical_suites(),
+            vec![Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519],
+            true,
+            false,
+            "libcrux".into(),
+        );
+        let refs: Vec<&DeviceCapability> = vec![&peer_a, &peer_b];
+
+        let emitter = InMemoryTelemetryEmitter::new();
+        let result = select_conversation_mode_with_emitter(&refs, &emitter, "libcrux");
+        assert_eq!(
+            result,
+            Err(ConversationUpgradeError::NoCommonCiphersuite {
+                mode: SecurityMode::PqConfidentiality,
+            })
+        );
+        let events = emitter.events();
+        assert!(
+            !events.is_empty(),
+            "must emit at least one telemetry event for selection failure"
+        );
+        // Both per-suite events must be present (one per advertised PQ
+        // suite at-or-below the target mode).
+        let suites: Vec<Ciphersuite> = events
+            .iter()
+            .filter_map(|e| match e {
+                PqTelemetryEvent::UnsupportedCiphersuite { ciphersuite, .. } => Some(*ciphersuite),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            suites.contains(&Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            "X-Wing must be flagged: {suites:?}"
+        );
+        assert!(
+            suites.contains(&Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519),
+            "ML-KEM-768 must be flagged: {suites:?}"
+        );
+    }
+
+    /// Companion to the disjoint-same-mode regression: when peers
+    /// genuinely advertise no PQ suites, the function must still emit
+    /// at least one fallback event so dashboards can pin the failure.
+    #[test]
+    fn with_emitter_emits_fallback_when_no_pq_suites_advertised() {
+        use crate::group::pq_telemetry::InMemoryTelemetryEmitter;
+
+        // Two peers with only classical suites, but disjoint classical
+        // suites → `NoCommonCiphersuite { mode: Classical }`.
+        let mut peer_a = classical_only_peer();
+        peer_a.classical_ciphersuites =
+            vec![Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519];
+        let mut peer_b = classical_only_peer();
+        peer_b.classical_ciphersuites =
+            vec![Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519];
+        let refs = vec![&peer_a, &peer_b];
+
+        let emitter = InMemoryTelemetryEmitter::new();
+        let result = select_conversation_mode_with_emitter(&refs, &emitter, "rustcrypto");
+        assert!(matches!(
+            result,
+            Err(ConversationUpgradeError::NoCommonCiphersuite { .. })
+        ));
+        assert_eq!(
+            emitter.events().len(),
+            1,
+            "exactly one fallback event when no PQ suites are advertised"
+        );
     }
 }
