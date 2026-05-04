@@ -218,6 +218,37 @@ Responsibilities of this layer:
 This keeps OpenMLS itself focused on RFC 9420 group operations while letting
 KChat compose them into the APQ pattern.
 
+### `DeviceCapability` and `SecurityMode`
+
+Two pieces of the orchestration layer ship inside this repo so any consumer
+of `openmls` can use them without re-deriving the wire format:
+
+- **`DeviceCapability`** ([`openmls::credentials::DeviceCapability`](./openmls/src/credentials/device_capability.rs))
+  is the signed, TLS-encoded blob a device publishes to advertise:
+  - `mls_version`,
+  - `classical_ciphersuites` and `pq_ciphersuites`,
+  - `apq_supported` and `pq_auth_supported` flags,
+  - `provider_id` (e.g. `"libcrux"`, `"rustcrypto"`),
+  - `capability_signature` over the rest of the fields.
+
+  The signature covers everything except itself, so the server-side capability
+  registry can re-fan-out the blob without being able to forge or upgrade
+  it. `best_common_ciphersuite()` picks the strongest suite a peer set has
+  in common (PQ preferred over classical).
+
+- **`SecurityMode`** ([`openmls::ciphersuite::SecurityMode`](./openmls/src/ciphersuite/security_mode.rs))
+  is the wire-stable `Classical < PqConfidentiality < PqAuthenticity`
+  enum that drives mode selection and downgrade prevention. Helpers:
+  - `from_ciphersuite()` — maps a concrete ciphersuite to the mode it
+    provides (PQ KEM + ML-DSA → `PqAuthenticity`, PQ KEM + classical sig →
+    `PqConfidentiality`, otherwise `Classical`).
+  - `select_mode()` — picks the highest mode all peers in a slice support,
+    based on `pq_auth_supported` / `pq_ciphersuites`.
+  - `select_ciphersuite()` — picks the best concrete ciphersuite for a
+    target mode from the peer-set intersection.
+  - `allows_transition(from, to)` — no-downgrade primitive (`true` iff
+    `to >= from`); callers gate every conversation mode change on this.
+
 ## Storage Requirements
 
 Clients must persist enough state to recover both sessions deterministically:
