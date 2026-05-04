@@ -89,7 +89,14 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 #### Migration protocol
 
-- [ ] Implement `DeviceCapability` advertisement and server-side registry.
+- [x] Implement `DeviceCapability` advertisement (struct, signing,
+      verification, common-ciphersuite selection — see
+      `openmls/src/credentials/device_capability.rs`). Server-side
+      registry/storage is still pending.
+- [x] Implement `SecurityMode` enum and selection logic (Classical /
+      PqConfidentiality / PqAuthenticity, mode + ciphersuite selection from
+      a peer set, no-downgrade transition helper — see
+      `openmls/src/ciphersuite/security_mode.rs`).
 - [ ] Implement multi-ciphersuite KeyPackage publication.
 - [ ] Implement conversation upgrade logic (new conversations first).
 - [ ] Implement the MLS `ReInit` flow for 1:1 and small group upgrades.
@@ -121,14 +128,42 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | Gap                                              | Impact                                                                |
 |--------------------------------------------------|-----------------------------------------------------------------------|
 | X-Wing only, draft codepoint `0x004D`            | Not sufficient for final standards-based deployment                   |
-| RustCrypto provider panics on X-Wing             | Misconfiguration could be operationally unsafe                        |
-| No ML-DSA signature support                      | PQ confidentiality ≠ PQ authenticity                                  |
+| ~~RustCrypto provider panics on X-Wing~~         | Fixed: RustCrypto returns `UnsupportedCiphersuite` instead of panicking |
+| No ML-DSA signature support in any provider      | PQ confidentiality ≠ PQ authenticity (enum + helpers landed; no provider impl) |
 | No APQ-MLS combiner                              | Needed for bandwidth-efficient PQ at scale                            |
 | No migration state machine                       | Millions of users need per-device, per-conversation upgrade logic     |
 | No server-side capability protocol               | Required for staged rollout                                           |
 | No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs                          |
 
 ## Changelog
+
+### 2026-05-04 (later session)
+
+- Added `DeviceCapability` struct (
+  `openmls/src/credentials/device_capability.rs`) for signed per-device
+  capability advertisement: classical and PQ ciphersuite lists, APQ
+  support flag, PQ-authenticity support flag, free-form provider id, and
+  a signature over the rest. `serializable_payload()` produces the
+  canonical signing input; `sign()` / `verify()` / `is_signed()` use any
+  `OpenMlsCrypto` provider; `best_common_ciphersuite()` picks the best
+  shared suite across a peer set (PQ preferred over classical).
+  Hand-rolled TLS codec impl encodes `bool` as `u8` and `String` as
+  `VLBytes`. 9 unit tests cover roundtrip, sign/verify, tamper rejection,
+  and selection edge cases.
+- Added `SecurityMode` enum (
+  `openmls/src/ciphersuite/security_mode.rs`) with
+  `Classical < PqConfidentiality < PqAuthenticity` ordering and
+  `repr(u8)` wire stability. Helpers: `from_ciphersuite()`,
+  `select_mode()` (highest mode all peers support),
+  `select_ciphersuite()` (best suite for a target mode), and
+  `allows_transition()` (no-downgrade primitive). 12 unit tests cover
+  mode selection, ciphersuite selection, downgrade rejection, and
+  ordering invariants.
+- Added `openmls/tests/pq_capability_tests.rs` integration tests (7
+  tests): TLS roundtrip, sign+verify with Ed25519 plus tamper rejection,
+  best-common-ciphersuite for all-PQ and mixed peer sets, security-mode
+  selection across peer combinations, no-downgrade enforcement, and
+  `Classical < PqConfidentiality < PqAuthenticity` ordering invariant.
 
 ### 2026-05-04
 

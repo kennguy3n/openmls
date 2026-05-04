@@ -43,7 +43,10 @@ use errors::*;
 use crate::group::MlsGroup;
 
 // Public
+pub mod device_capability;
 pub mod errors;
+
+pub use device_capability::DeviceCapability;
 
 /// CredentialType.
 ///
