@@ -47,6 +47,12 @@ The ciphersuite/provider layer in this repo is split between two providers:
   X-Wing returns `CryptoError::UnsupportedCiphersuite` (rather than
   panicking), and `signature_key_gen` rejects ML-DSA with
   `CryptoError::UnsupportedSignatureScheme`.
+- **ML-DSA-65** (FIPS 204) is implemented in the libcrux provider behind
+  a dedicated **`mldsa` Cargo feature** (surfaced as `openmls/mldsa`).
+  With `mldsa` enabled, `signature_key_gen`, `sign`, and `verify_signature`
+  are wired through to libcrux for `SignatureScheme::MLDSA65`; `MLDSA44`
+  and `MLDSA87` still return `UnsupportedSignatureScheme`. With `mldsa`
+  disabled, all three schemes are rejected.
 
 ## Security Modes
 
@@ -164,21 +170,32 @@ separate axes:
     codepoint `0xFE02` — same KEM with ChaCha20-Poly1305 AEAD.
   - `MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448` at draft codepoint
     `0xFE03` — pure ML-KEM-1024 (FIPS 203) with Ed448 signatures.
-  All three are flagged via `Ciphersuite::is_draft_codepoint()` and
+  - `MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519` at draft codepoint
+    `0xFE04` — pure ML-KEM-768 with classical Ed25519 signatures,
+    AES-256-GCM AEAD.
+  - `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65` at draft
+    codepoint `0xFE05` — ML-KEM-768 + X25519 hybrid KEM with
+    ML-DSA-65 signatures (FIPS 204). Classified as
+    `PQ_AUTHENTICITY`.
+  - `MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65` at draft codepoint
+    `0xFE06` — pure ML-KEM-768 with ML-DSA-65 signatures.
+    Classified as `PQ_AUTHENTICITY`.
+  All six are flagged via `Ciphersuite::is_draft_codepoint()` and
   rejected with `CryptoError::UnsupportedCiphersuite` by both providers
-  until libcrux gains ML-KEM bindings.
+  until libcrux gains ML-KEM bindings (the ML-DSA-65 signature side
+  ships behind the `mldsa` feature today).
 
 **Authenticity (signatures):**
 - ML-DSA suites (FIPS 204) — required for `PQ_AUTHENTICITY`. Distinct from KEM
   selection: a conversation can run a hybrid KEM with classical Ed25519
   signatures (`PQ_CONFIDENTIALITY`) or with ML-DSA (`PQ_AUTHENTICITY`).
-  The `SignatureScheme` enum in `traits/src/types.rs` already exposes
+  The `SignatureScheme` enum in `traits/src/types.rs` exposes
   `MLDSA44 = 0x0904`, `MLDSA65 = 0x0905`, and `MLDSA87 = 0x0906` (all
-  draft codepoints) so the rest of the stack can compile against them.
-  **Provider implementations are not yet wired up:** both the RustCrypto
-  and libcrux providers reject these schemes with
-  `CryptoError::UnsupportedSignatureScheme`. Implementing ML-DSA in at
-  least one provider is tracked in [`PROGRESS.md`](./PROGRESS.md).
+  draft codepoints). **`MLDSA65` is now implemented in the libcrux
+  provider behind the `mldsa` feature flag** (key generation, sign,
+  verify); `MLDSA44` and `MLDSA87` remain rejected as
+  `UnsupportedSignatureScheme`. RustCrypto rejects all three. Status
+  tracked in [`PROGRESS.md`](./PROGRESS.md).
 
 ### Draft codepoint hygiene
 
@@ -252,7 +269,9 @@ The orchestration layer is implemented as the following modules in the
 | `KeyPackageFetchRateLimiter`               | `openmls/src/key_packages/rate_limiter.rs`               | Phase 1 sliding-window rate limiter for PQ KeyPackage fetches.                        |
 | `PqTelemetryEvent` / `PqTelemetryEmitter`  | `openmls/src/group/pq_telemetry.rs`                      | Cross-phase telemetry: 8-variant event enum + `NoOp` and `InMemory` emitters. Wired into `KChatMlsConversation` and the orchestration entry points via `*_with_emitter` wrapper functions. |
 | `DeliveryService` / `ApqDeliveryEnvelope`  | `openmls/src/messages/delivery_service.rs`               | In-memory reference Delivery Service. Per-group FIFO queues, FULL-pair PQ‑before‑T ordering enforcement, and `enqueue` / `deliver_next` / `pending_count` / `pending_full_pairs`. |
-| `MigrationStateMachine` / `MigrationEvent` | `openmls/src/group/migration_state.rs`                   | Per-conversation upgrade lifecycle state machine: 8 states from `NotStarted` through `Operational` / `Failed`, with `advance` / `can_advance` / `is_terminal` and `Failed` reachable from any non-terminal state. |
+| `MigrationStateMachine` / `MigrationEvent` / `ConversationLifecycle` | `openmls/src/group/migration_state.rs`         | Per-conversation upgrade lifecycle state machine: 8 fine-grained states from `NotStarted` through `Operational` / `Failed`. The `ConversationLifecycle` projection collapses these onto eight named phases (Classical, UpgradeEligible, UpgradeProposed, UpgradeInProgress, PqActive, ApqBootstrapping, ApqActive, Failed). `KChatMlsConversation::migration_state` now holds an `Option<MigrationStateMachine>` and `lifecycle()` returns the projection. |
+| `ApqMessage` / `ApqCommitPair` / `ApqDeliveryOrder` | `openmls/src/messages/apq_delivery.rs`           | Delivery Service APQ wire wrapper. `ApqMessage` pairs a payload with a `SessionSide` marker; `ApqCommitPair` bundles a PQ commit + T commit + a declared `ApqDeliveryOrder` (PqFirst, TFirst, Independent); `validate_order` rejects misordered FULL pairs. Mirrored in `delivery-service/ds-lib/src/apq.rs` as an `ApqEnvelope` tagged union. |
+| `CapabilityPublishRequest` / `CapabilityFetchRequest` / `CapabilityUpdateNotification` | `openmls/src/credentials/capability_protocol.rs`     | Wire protocol for client/server capability exchange. Publish / fetch / notification request-response messages with TLS codecs and signature verification, layered on top of the existing in-memory `CapabilityRegistry`. |
 
 FULL and PARTIAL commits are wired through `MlsGroup::commit_builder`:
 `prepare_full_commit` runs the PQ commit first, derives `apq_psk` via

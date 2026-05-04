@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~70%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~80%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
@@ -108,12 +108,17 @@ PQ-capable can be upgraded to PQ via `ReInit` without losing message history.
 at
 [`openmls/src/group/reinit_upgrade.rs`](./openmls/src/group/reinit_upgrade.rs).
 `propose_reinit` builds the proposal and rejects same-suite transitions
-and mode downgrades, `commit_reinit` stages and merges the ReInit
-commit (transitioning the old group to `Inactive`), and
-`complete_reinit` derives the Resumption(ReInit) PSK via the MLS
-exporter (`REINIT_PSK_LABEL = "kchat-reinit-psk"`, 32 bytes),
-stores the `PreSharedKeyId`, and returns it for the new-group
-Welcome.
+and mode downgrades, `commit_reinit` derives the Resumption(ReInit)
+PSK via the MLS exporter (`REINIT_PSK_LABEL = "kchat-reinit-psk"`,
+32 bytes) **before** sealing the old group via `set_inactive`, and
+stores the secret on `ReInitCommit`. `complete_reinit_from_commit`
+then consumes the pre-derived secret and registers the
+`PreSharedKeyId` for the new group's Welcome. This avoids the prior
+`UseAfterEviction` failure where `complete_reinit` tried to call
+`export_secret` on an inactive group; see
+[`openmls/tests/pq_reinit_e2e_tests.rs`](./openmls/tests/pq_reinit_e2e_tests.rs)
+(`commit_reinit_then_complete_reinit_from_commit_succeeds_after_seal`)
+for the regression test.
 
 ## Phase 4 — Upgrade Larger Groups Using APQ Bootstrap
 
@@ -239,13 +244,44 @@ authentication / authorization shim.
 **Migration state machine.** Independent of the per-component
 reference impls above, every conversation upgrade is tracked by
 [`openmls/src/group/migration_state.rs`](./openmls/src/group/migration_state.rs)
-(`MigrationStateMachine`). The state machine has eight states
-(`NotStarted` → `CapabilitiesCollected` → `KeyPackagesPublished` →
+(`MigrationStateMachine`). The state machine has eight fine-grained
+states (`NotStarted` → `CapabilitiesCollected` → `KeyPackagesPublished` →
 `ModeSelected` → `BootstrapInitiated` → `BootstrapComplete` →
 `FirstFullCommitDone` → `Operational` | `Failed`); `Failed` is
-reachable from any non-terminal state. Servers and clients use it to
-reason about progress without pattern-matching on `KChatMlsConversation`
-internals.
+reachable from any non-terminal state. The accompanying
+`ConversationLifecycle` projection collapses these onto eight named
+phases (Classical, UpgradeEligible, UpgradeProposed,
+UpgradeInProgress, PqActive, ApqBootstrapping, ApqActive, Failed) for
+UI / metrics / on-disk persistence. `KChatMlsConversation` exposes an
+optional `migration_state: Option<MigrationStateMachine>` field plus a
+`lifecycle()` accessor returning the projection.
+
+**Capability protocol.** The wire protocol for client/server
+capability exchange lives in
+[`openmls/src/credentials/capability_protocol.rs`](./openmls/src/credentials/capability_protocol.rs).
+`CapabilityPublishRequest` / `CapabilityPublishResponse`,
+`CapabilityFetchRequest` / `CapabilityFetchResponse`, and
+`CapabilityUpdateNotification` carry TLS codecs, signature
+verification on every accepted capability, and a registry-backed
+publish/fetch/notification flow on top of the existing in-memory
+`CapabilityRegistry`.
+
+**Delivery service APQ wrapper.** The wire wrapper for paired APQ
+messages lives in
+[`openmls/src/messages/apq_delivery.rs`](./openmls/src/messages/apq_delivery.rs)
+and is mirrored as `delivery-service/ds-lib/src/apq.rs`. `ApqMessage`
+pairs a payload with a `SessionSide` marker, `ApqCommitPair` bundles
+a PQ commit + T commit + a declared `ApqDeliveryOrder`, and
+`validate_order` rejects misordered FULL commit pairs.
+
+**Load testing.** Phase 1 (KeyPackage storage) and Phase 4 (Welcome
+fanout) ship `#[ignore]`d high-scale tests in
+[`openmls/tests/pq_load_tests.rs`](./openmls/tests/pq_load_tests.rs)
+(10K KPs across 1000 devices, rate-limiter burst, last-resort
+fallback) and
+[`openmls/tests/pq_welcome_fanout_tests.rs`](./openmls/tests/pq_welcome_fanout_tests.rs)
+(100 / 500 / 1000-member fanout pinning the ~2669-byte / PQ
+KeyPackage budget). Run them with `cargo test -- --ignored`.
 
 ## Rollout Gates
 

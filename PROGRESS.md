@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~70%**
+**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~80%**
 
 ## Version Targets
 
@@ -74,19 +74,27 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 #### MLS PQ ciphersuite layer
 
 - [x] Add IETF MLS PQ draft ciphersuites (ML-KEM hybrid, pure ML-KEM)
-      with versioned draft codepoints. Three new variants in
+      with versioned draft codepoints. Six variants in
       `traits/src/types.rs`:
       `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519` (`0xFE01`),
       `MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519`
-      (`0xFE02`), and `MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448`
-      (`0xFE03`). All flagged via `is_draft_codepoint()`. Both providers
-      reject them with `UnsupportedCiphersuite`.
+      (`0xFE02`), `MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448`
+      (`0xFE03`), `MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519`
+      (`0xFE04`), `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65`
+      (`0xFE05`), and `MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65`
+      (`0xFE06`). All flagged via `is_draft_codepoint()`. Both providers
+      reject them with `UnsupportedCiphersuite` until libcrux ML-KEM
+      and ML-DSA bindings land.
 - [x] Add ML-DSA signature scheme support to the `SignatureScheme` enum
       (`traits/src/types.rs`). Variants `MLDSA44 = 0x0904`,
       `MLDSA65 = 0x0905`, `MLDSA87 = 0x0906` are wired through with
       `is_draft_codepoint()` and `is_post_quantum()` helpers; both providers
       explicitly reject them.
-- [ ] Implement ML-DSA in at least one crypto provider.
+- [x] Implement ML-DSA in at least one crypto provider — libcrux
+      provider gates ML-DSA-65 keygen / sign / verify behind a new
+      `mldsa` feature flag (surfaced as `openmls/mldsa`). RustCrypto
+      still rejects all three ML-DSA variants with
+      `UnsupportedSignatureScheme`.
 
 #### APQ-MLS combiner
 
@@ -190,11 +198,69 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | ~~No APQ-MLS combiner~~                          | Combiner scaffolding (FULL/PARTIAL commits, ApqInfo, bootstrap, ReInit, resync) is wired against `MlsGroup`; live multi-client soak tests still pending |
 | Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `DeliveryService`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage |
 | ~~`commit_reinit` seals the old group before `complete_reinit` can run~~ | Fixed: `commit_reinit` now derives the Resumption(ReInit) PSK before sealing the old group and stores it on `ReInitCommit`. `complete_reinit` consumes the pre-derived secret instead of calling `export_secret` on an inactive group |
-| ~~No migration state machine~~                   | Fixed: per-conversation `MigrationStateMachine` in `openmls/src/group/migration_state.rs` with 8-state lifecycle and 12 unit tests |
-| No server-side capability protocol               | Required for staged rollout                                           |
-| No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs (ML-KEM hybrid + pure ML-KEM 1024 draft codepoints landed in this batch)         |
+| ~~No migration state machine~~                   | Fixed: per-conversation `MigrationStateMachine` in `openmls/src/group/migration_state.rs` with the 8-state fine-grained lifecycle and the higher-level `ConversationLifecycle` projection wired into `KChatMlsConversation::migration_state` |
+| ~~No server-side capability protocol~~            | Fixed: wire types in `openmls/src/credentials/capability_protocol.rs` (publish / fetch / notification request-response messages with TLS codecs and signature verification, layered on top of the existing in-memory `CapabilityRegistry`) |
+| No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs (six ML-KEM hybrid + pure ML-KEM 768/1024 + ML-DSA-signed draft codepoints currently shipped) |
 
 ## Changelog
+
+### 2026-05-04 (PQ batch 4 — provider impls + wire protocols)
+
+- Added three more IETF MLS PQ draft ciphersuites to
+  `traits/src/types.rs`:
+  `MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519` (`0xFE04`),
+  `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65` (`0xFE05`), and
+  `MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65` (`0xFE06`). Added the
+  `MlKem768Draft` (`0xFE04`) `HpkeKemType` for pure ML-KEM-768.
+  Updated `SecurityMode::from_ciphersuite` so MLDSA65-signed suites
+  classify as `PqAuthenticity` and the ML-DSA-free hybrid /
+  pure-MLKEM suites classify as `PqConfidentiality`.
+- Implemented ML-DSA-65 in the libcrux provider behind a new `mldsa`
+  feature flag (`libcrux_crypto/Cargo.toml`,
+  `libcrux_crypto/src/crypto.rs`), surfaced as `openmls/mldsa`.
+  Provider implements `signature_key_gen`, `sign`, and
+  `verify_signature` for `SignatureScheme::MLDSA65`; `MLDSA44` and
+  `MLDSA87` still return `UnsupportedSignatureScheme`. RustCrypto
+  rejects all three.
+- Added `openmls/src/messages/apq_delivery.rs` — Delivery Service
+  APQ wrapper. `ApqMessage` pairs a payload with a `SessionSide`
+  marker; `ApqCommitPair` bundles a PQ commit with its T commit and
+  a declared `ApqDeliveryOrder` (PqFirst, TFirst, Independent);
+  `validate_order` rejects misordered FULL commit pairs. Hand-written
+  TLS codec + 7 integration tests in
+  `openmls/tests/pq_apq_delivery_wire_tests.rs`. Mirrored as
+  `delivery-service/ds-lib/src/apq.rs` exposing the wrapper to the
+  delivery service crate via an `ApqEnvelope` tagged-union.
+- Added `openmls/src/credentials/capability_protocol.rs` — wire
+  protocol for client/server capability exchange.
+  `CapabilityPublishRequest` / `CapabilityPublishResponse`,
+  `CapabilityFetchRequest` / `CapabilityFetchResponse`, and
+  `CapabilityUpdateNotification` with TLS codecs, signature
+  verification on every accepted capability, and a registry-backed
+  publish/fetch/notification flow built on top of the existing
+  in-memory `CapabilityRegistry`.
+- Added the `ConversationLifecycle` projection in
+  `openmls/src/group/migration_state.rs`: the eight named lifecycle
+  phases (Classical, UpgradeEligible, UpgradeProposed,
+  UpgradeInProgress, PqActive, ApqBootstrapping, ApqActive, Failed)
+  derived from the fine-grained `MigrationStateMachine`. Wired the
+  optional `migration_state: Option<MigrationStateMachine>` field
+  onto `KChatMlsConversation` plus accessor / mutator / `lifecycle`
+  helpers, and shipped `openmls/tests/pq_migration_state_tests.rs`
+  pinning the full Classical → ApqActive happy path through the
+  external API.
+- Extended the KAT framework in `openmls/tests/pq_kat_tests.rs`.
+  X-Wing now runs a functional HPKE roundtrip against the libcrux
+  provider; ML-DSA gains a sign/verify roundtrip runner gated behind
+  the `mldsa` feature; ML-KEM gains a schema-validation runner that
+  asserts draft codepoints and hex-decodes every field.
+- Added high-scale `#[ignore]`d load tests:
+  `pq_load_tests.rs` adds a 10K-KP / 1000-device publish-and-fetch
+  stress test, a 4K-KP `expire_before` bulk purge, a rate-limiter
+  burst test, and a 200-device last-resort fallback test;
+  `pq_welcome_fanout_tests.rs` adds 100/500/1000-member fanout
+  tests pinning the `~2669-byte` per-PQ-KeyPackage budget plus a
+  paired-`ApqWelcome` size test. Run with `cargo test -- --ignored`.
 
 ### 2026-05-04 (PQ batch 3 — orchestration completion)
 
