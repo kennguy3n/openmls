@@ -238,10 +238,20 @@ impl MigrationStateMachine {
             (MigrationState::BootstrapComplete, MigrationEvent::FirstFullCommitDone) => {
                 Ok(MigrationState::FirstFullCommitDone)
             }
+            (MigrationState::FirstFullCommitDone, MigrationEvent::ModeSelected(_)) => {
+                // Reject `ModeSelected` from `FirstFullCommitDone`. The
+                // target mode was recorded earlier in the lifecycle;
+                // accepting it here would silently overwrite
+                // `target_mode` via the side effect in `advance_at`.
+                Err(MigrationError::InvalidTransition {
+                    state: state.clone(),
+                    event: event.clone(),
+                })
+            }
             (MigrationState::FirstFullCommitDone, _) => {
                 // FirstFullCommitDone auto-advances to Operational on
-                // *any* further non-Failed event. We don't expose
-                // an `Operational` event explicitly.
+                // any further non-Failed, non-ModeSelected event. We
+                // don't expose an `Operational` event explicitly.
                 Ok(MigrationState::Operational)
             }
             (s, e) => Err(MigrationError::InvalidTransition {
@@ -506,5 +516,44 @@ mod tests {
             MigrationState::Failed(reason) => assert_eq!(reason, "provider crashed"),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    /// Regression test: from `FirstFullCommitDone`, a stray
+    /// `ModeSelected(_)` event must be rejected with
+    /// `InvalidTransition`. The previous catch-all silently accepted
+    /// it, transitioned to `Operational`, and overwrote the
+    /// previously-recorded `target_mode` with the stray value.
+    #[test]
+    fn first_full_commit_done_rejects_mode_selected_and_preserves_target_mode() {
+        let mut sm = MigrationStateMachine::new(conv_id());
+        sm.advance(MigrationEvent::CapabilitiesReady).unwrap();
+        sm.advance(MigrationEvent::KeyPackagesReady).unwrap();
+        sm.advance(MigrationEvent::ModeSelected(
+            SecurityMode::PqConfidentiality,
+        ))
+        .unwrap();
+        sm.advance(MigrationEvent::BootstrapStarted).unwrap();
+        sm.advance(MigrationEvent::BootstrapDone).unwrap();
+        sm.advance(MigrationEvent::FirstFullCommitDone).unwrap();
+        assert_eq!(sm.state(), &MigrationState::FirstFullCommitDone);
+        assert_eq!(sm.target_mode(), Some(SecurityMode::PqConfidentiality));
+
+        // Stray ModeSelected must be rejected.
+        let err = sm
+            .advance(MigrationEvent::ModeSelected(SecurityMode::PqAuthenticity))
+            .unwrap_err();
+        assert!(
+            matches!(err, MigrationError::InvalidTransition { .. }),
+            "expected InvalidTransition, got {err:?}"
+        );
+        // State and target_mode must be untouched.
+        assert_eq!(sm.state(), &MigrationState::FirstFullCommitDone);
+        assert_eq!(sm.target_mode(), Some(SecurityMode::PqConfidentiality));
+
+        // Subsequent legitimate event still drives to Operational and
+        // leaves target_mode intact.
+        sm.advance(MigrationEvent::FirstFullCommitDone).unwrap();
+        assert_eq!(sm.state(), &MigrationState::Operational);
+        assert_eq!(sm.target_mode(), Some(SecurityMode::PqConfidentiality));
     }
 }
