@@ -51,16 +51,18 @@ impl Default for RustCrypto {
 }
 
 #[inline(always)]
-fn kem_mode(kem: HpkeKemType) -> hpke_types::KemAlgorithm {
+fn kem_mode(kem: HpkeKemType) -> Result<hpke_types::KemAlgorithm, CryptoError> {
     match kem {
-        HpkeKemType::DhKemP256 => hpke_types::KemAlgorithm::DhKemP256,
-        HpkeKemType::DhKemP384 => hpke_types::KemAlgorithm::DhKemP384,
-        HpkeKemType::DhKemP521 => hpke_types::KemAlgorithm::DhKemP521,
-        HpkeKemType::DhKem25519 => hpke_types::KemAlgorithm::DhKem25519,
-        HpkeKemType::DhKem448 => hpke_types::KemAlgorithm::DhKem448,
-        HpkeKemType::XWingKemDraft6 => {
-            unimplemented!("XWingKemDraft6 is not supported by the RustCrypto provider.")
-        }
+        HpkeKemType::DhKemP256 => Ok(hpke_types::KemAlgorithm::DhKemP256),
+        HpkeKemType::DhKemP384 => Ok(hpke_types::KemAlgorithm::DhKemP384),
+        HpkeKemType::DhKemP521 => Ok(hpke_types::KemAlgorithm::DhKemP521),
+        HpkeKemType::DhKem25519 => Ok(hpke_types::KemAlgorithm::DhKem25519),
+        HpkeKemType::DhKem448 => Ok(hpke_types::KemAlgorithm::DhKem448),
+        // The RustCrypto provider intentionally does not implement any
+        // post-quantum KEM. Returning `UnsupportedCiphersuite` here keeps a
+        // misconfiguration from crashing the process — a callable signal to
+        // the caller that this provider cannot speak X-Wing.
+        HpkeKemType::XWingKemDraft6 => Err(CryptoError::UnsupportedCiphersuite),
     }
 }
 
@@ -333,7 +335,7 @@ impl OpenMlsCrypto for RustCrypto {
         aad: &[u8],
         ptxt: &[u8],
     ) -> Result<types::HpkeCiphertext, CryptoError> {
-        let (kem_output, ciphertext) = hpke_from_config(config)
+        let (kem_output, ciphertext) = hpke_from_config(config)?
             .seal(&pk_r.into(), info, aad, ptxt, None, None, None)
             .map_err(|e| match e {
                 hpke::HpkeError::InvalidInput => CryptoError::InvalidLength,
@@ -353,7 +355,7 @@ impl OpenMlsCrypto for RustCrypto {
         info: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        hpke_from_config(config)
+        hpke_from_config(config)?
             .open(
                 input.kem_output.as_slice(),
                 &sk_r.into(),
@@ -375,7 +377,7 @@ impl OpenMlsCrypto for RustCrypto {
         exporter_context: &[u8],
         exporter_length: usize,
     ) -> Result<(Vec<u8>, ExporterSecret), CryptoError> {
-        let (kem_output, context) = hpke_from_config(config)
+        let (kem_output, context) = hpke_from_config(config)?
             .setup_sender(&pk_r.into(), info, None, None, None)
             .map_err(|_| CryptoError::SenderSetupError)?;
         let exported_secret = context
@@ -393,7 +395,7 @@ impl OpenMlsCrypto for RustCrypto {
         exporter_context: &[u8],
         exporter_length: usize,
     ) -> Result<ExporterSecret, CryptoError> {
-        let context = hpke_from_config(config)
+        let context = hpke_from_config(config)?
             .setup_receiver(enc, &sk_r.into(), info, None, None, None)
             .map_err(|_| CryptoError::ReceiverSetupError)?;
         let exported_secret = context
@@ -407,7 +409,7 @@ impl OpenMlsCrypto for RustCrypto {
         config: HpkeConfig,
         ikm: &[u8],
     ) -> Result<types::HpkeKeyPair, CryptoError> {
-        let kp = hpke_from_config(config)
+        let kp = hpke_from_config(config)?
             .derive_key_pair(ikm)
             .map_err(|e| match e {
                 hpke::HpkeError::InvalidInput => CryptoError::InvalidLength,
@@ -421,13 +423,13 @@ impl OpenMlsCrypto for RustCrypto {
     }
 }
 
-fn hpke_from_config(config: HpkeConfig) -> Hpke<HpkeRustCrypto> {
-    Hpke::<HpkeRustCrypto>::new(
+fn hpke_from_config(config: HpkeConfig) -> Result<Hpke<HpkeRustCrypto>, CryptoError> {
+    Ok(Hpke::<HpkeRustCrypto>::new(
         hpke::Mode::Base,
-        kem_mode(config.0),
+        kem_mode(config.0)?,
         kdf_mode(config.1),
         aead_mode(config.2),
-    )
+    ))
 }
 
 impl OpenMlsRand for RustCrypto {
@@ -456,4 +458,108 @@ pub enum RandError {
     LockPoisoned,
     #[error("Unable to collect enough randomness.")]
     NotEnoughRandomness,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openmls_traits::types::{HpkeAeadType, HpkeConfig, HpkeKdfType, HpkeKemType};
+
+    fn xwing_config() -> HpkeConfig {
+        HpkeConfig(
+            HpkeKemType::XWingKemDraft6,
+            HpkeKdfType::HkdfSha256,
+            HpkeAeadType::ChaCha20Poly1305,
+        )
+    }
+
+    #[test]
+    fn test_supports_rejects_xwing() {
+        let provider = RustCrypto::default();
+        assert_eq!(
+            provider.supports(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            Err(CryptoError::UnsupportedCiphersuite),
+            "RustCrypto must not advertise X-Wing support",
+        );
+    }
+
+    #[test]
+    fn test_supported_ciphersuites_excludes_xwing() {
+        let provider = RustCrypto::default();
+        let suites = provider.supported_ciphersuites();
+        assert!(
+            !suites.contains(&Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            "supported_ciphersuites() must not list X-Wing on the RustCrypto provider, got {suites:?}",
+        );
+    }
+
+    #[test]
+    fn test_xwing_hpke_seal_returns_error() {
+        let provider = RustCrypto::default();
+        // The receiver public key is a placeholder \u2014 we expect the call to bail
+        // out on `kem_mode` before any cryptographic work happens.
+        let pk_r = [0u8; 32];
+        let result = provider.hpke_seal(xwing_config(), &pk_r, b"info", b"aad", b"ptxt");
+        assert_eq!(
+            result.err(),
+            Some(CryptoError::UnsupportedCiphersuite),
+            "hpke_seal must return UnsupportedCiphersuite for X-Wing rather than panicking",
+        );
+    }
+
+    #[test]
+    fn test_xwing_hpke_open_returns_error() {
+        let provider = RustCrypto::default();
+        let input = HpkeCiphertext {
+            kem_output: vec![0u8; 32].into(),
+            ciphertext: vec![0u8; 32].into(),
+        };
+        let sk_r = [0u8; 32];
+        let result = provider.hpke_open(xwing_config(), &input, &sk_r, b"info", b"aad");
+        assert_eq!(
+            result.err(),
+            Some(CryptoError::UnsupportedCiphersuite),
+            "hpke_open must return UnsupportedCiphersuite for X-Wing rather than panicking",
+        );
+    }
+
+    #[test]
+    fn test_xwing_derive_hpke_keypair_returns_error() {
+        let provider = RustCrypto::default();
+        let ikm = [0u8; 32];
+        let result = provider.derive_hpke_keypair(xwing_config(), &ikm);
+        assert!(matches!(result, Err(CryptoError::UnsupportedCiphersuite)));
+    }
+
+    #[test]
+    fn test_classical_ciphersuites_supported() {
+        let provider = RustCrypto::default();
+        for suite in [
+            Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+            Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+            Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256,
+        ] {
+            assert_eq!(
+                provider.supports(suite),
+                Ok(()),
+                "RustCrypto must support classical ciphersuite {suite:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rustcrypto_rejects_mldsa() {
+        let provider = RustCrypto::default();
+        for scheme in [
+            SignatureScheme::MLDSA44,
+            SignatureScheme::MLDSA65,
+            SignatureScheme::MLDSA87,
+        ] {
+            assert_eq!(
+                provider.signature_key_gen(scheme).err(),
+                Some(CryptoError::UnsupportedSignatureScheme),
+                "RustCrypto must not implement ML-DSA scheme {scheme:?}"
+            );
+        }
+    }
 }

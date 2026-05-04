@@ -62,6 +62,11 @@ libcrux-provider = [
     "dep:openmls_libcrux_crypto",
     "openmls_test?/libcrux-provider",
 ]
+# Enable the X-Wing draft-06 hybrid KEM ciphersuite
+# (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`) on the libcrux provider.
+# Requires `libcrux-provider`. The codepoint `0x004D` is a draft and will
+# change once IANA assigns a final value, so this feature is opt-in.
+xwing = ["libcrux-provider", "openmls_libcrux_crypto?/xwing"]
 sqlite-provider = [
     "dep:openmls_sqlite_storage",
     "openmls_test?/sqlite-provider",

@@ -9,6 +9,7 @@ storage requirements, and the main risks.
 
 The companion documents are:
 
+- [`PROPOSAL.md`](./PROPOSAL.md) — high-level product proposal.
 - [`PHASES.md`](./PHASES.md) — staged migration plan and rollout gates.
 - [`PROGRESS.md`](./PROGRESS.md) — concrete state of this repository.
 
@@ -27,6 +28,25 @@ The base protocol — group state, framing, key schedule, ratchet tree — comes
 from RFC 9420 and is provided unchanged by upstream OpenMLS. PQ work happens
 at two layers above that: the ciphersuite/provider layer (ML-KEM, ML-DSA,
 X-Wing) and the orchestration layer (APQ-MLS combiner, migration policy).
+
+### Crypto provider layout
+
+The ciphersuite/provider layer in this repo is split between two providers:
+
+- **libcrux** (`libcrux_crypto`) is the PQ-capable provider. The X-Wing
+  draft-06 hybrid KEM (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`,
+  draft codepoint `0x004D`) is gated behind a dedicated **`xwing` Cargo
+  feature** so the draft suite cannot be selected without an explicit
+  build-time opt-in. With `xwing` disabled, `supports()` rejects the suite,
+  `supported_ciphersuites()` omits it, and `hpke_kem` returns
+  `CryptoError::UnsupportedCiphersuite` instead of routing to the draft KEM.
+  The `openmls` crate exposes a passthrough `xwing` feature that pulls in
+  `libcrux-provider` and turns on `openmls_libcrux_crypto/xwing`.
+- **RustCrypto** (`openmls_rust_crypto`) is the classical-only provider. It
+  intentionally does not implement any post-quantum primitives; selecting
+  X-Wing returns `CryptoError::UnsupportedCiphersuite` (rather than
+  panicking), and `signature_key_gen` rejects ML-DSA with
+  `CryptoError::UnsupportedSignatureScheme`.
 
 ## Security Modes
 
@@ -145,10 +165,26 @@ separate axes:
 - ML-DSA suites (FIPS 204) — required for `PQ_AUTHENTICITY`. Distinct from KEM
   selection: a conversation can run a hybrid KEM with classical Ed25519
   signatures (`PQ_CONFIDENTIALITY`) or with ML-DSA (`PQ_AUTHENTICITY`).
+  The `SignatureScheme` enum in `traits/src/types.rs` already exposes
+  `MLDSA44 = 0x0904`, `MLDSA65 = 0x0905`, and `MLDSA87 = 0x0906` (all
+  draft codepoints) so the rest of the stack can compile against them.
+  **Provider implementations are not yet wired up:** both the RustCrypto
+  and libcrux providers reject these schemes with
+  `CryptoError::UnsupportedSignatureScheme`. Implementing ML-DSA in at
+  least one provider is tracked in [`PROGRESS.md`](./PROGRESS.md).
+
+### Draft codepoint hygiene
 
 Until the IETF MLS PQ ciphersuite draft assigns final codepoints, all PQ
 suites are stored under draft / private codepoints and must be migrated to
 their final IANA-assigned values during rollout (see [`PROGRESS.md`](./PROGRESS.md)).
+To make the draft / final distinction visible at the type level,
+[`Ciphersuite`](./traits/src/types.rs), [`HpkeKemType`](./traits/src/types.rs),
+and [`SignatureScheme`](./traits/src/types.rs) each expose an
+`is_draft_codepoint()` helper. Production code paths that depend on a final
+IANA codepoint (e.g. no-downgrade enforcement, telemetry, capability
+advertisement) should consult these helpers rather than hard-coding the set
+of draft suites.
 
 ## KChat Orchestration Layer
 

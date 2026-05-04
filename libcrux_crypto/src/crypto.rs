@@ -32,6 +32,18 @@ impl CryptoProvider {
 
 impl OpenMlsCrypto for CryptoProvider {
     fn supports(&self, ciphersuite: Ciphersuite) -> Result<(), CryptoError> {
+        // The X-Wing hybrid KEM ciphersuite is gated behind the `xwing`
+        // feature flag because it still rides a draft codepoint (0x004D).
+        // Without `xwing` enabled, refuse to advertise support so callers
+        // never accidentally pin a group to a draft suite.
+        #[cfg(not(feature = "xwing"))]
+        if matches!(
+            ciphersuite,
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+        ) {
+            return Err(CryptoError::UnsupportedCiphersuite);
+        }
+
         match ciphersuite.aead_algorithm() {
             AeadType::ChaCha20Poly1305 | AeadType::Aes128Gcm | AeadType::Aes256Gcm => Ok(()),
         }?;
@@ -54,13 +66,19 @@ impl OpenMlsCrypto for CryptoProvider {
     }
 
     fn supported_ciphersuites(&self) -> Vec<Ciphersuite> {
-        vec![
+        // The `mut` is only used when the `xwing` feature is enabled, but
+        // `let mut` is the cleanest way to express the conditional push
+        // without duplicating the vec literal across two `cfg` arms.
+        #[cfg_attr(not(feature = "xwing"), allow(unused_mut))]
+        let mut suites = vec![
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
             Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
-            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
             // TODO: enable
             //Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256,
-        ]
+        ];
+        #[cfg(feature = "xwing")]
+        suites.push(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519);
+        suites
     }
 
     fn hkdf_extract(
@@ -263,7 +281,7 @@ impl OpenMlsCrypto for CryptoProvider {
         aad: &[u8],
         ptxt: &[u8],
     ) -> Result<HpkeCiphertext, CryptoError> {
-        let mut config = hpke_config(config);
+        let mut config = hpke_config(config)?;
 
         let pk_r = hpke_rs::HpkePublicKey::new(pk_r.to_vec());
 
@@ -291,7 +309,7 @@ impl OpenMlsCrypto for CryptoProvider {
         info: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let config = hpke_config(config);
+        let config = hpke_config(config)?;
 
         let sk_r = hpke_rs::HpkePrivateKey::new(sk_r.to_vec());
 
@@ -320,7 +338,7 @@ impl OpenMlsCrypto for CryptoProvider {
         exporter_context: &[u8],
         exporter_length: usize,
     ) -> Result<(KemOutput, ExporterSecret), CryptoError> {
-        let mut config = hpke_config(config);
+        let mut config = hpke_config(config)?;
 
         let pk_r = hpke_rs::HpkePublicKey::new(pk_r.to_vec());
 
@@ -342,7 +360,7 @@ impl OpenMlsCrypto for CryptoProvider {
         exporter_context: &[u8],
         exporter_length: usize,
     ) -> Result<ExporterSecret, CryptoError> {
-        let config = hpke_config(config);
+        let config = hpke_config(config)?;
 
         let sk_r = hpke_rs::HpkePrivateKey::new(sk_r.to_vec());
 
@@ -360,7 +378,7 @@ impl OpenMlsCrypto for CryptoProvider {
         config: HpkeConfig,
         ikm: &[u8],
     ) -> Result<HpkeKeyPair, CryptoError> {
-        let config = hpke_config(config);
+        let config = hpke_config(config)?;
 
         let key_pair: hpke_rs::HpkeKeyPair = config.derive_key_pair(ikm).map_err(|e| match e {
             hpke_rs::HpkeError::InvalidConfig => CryptoError::InvalidLength,
@@ -376,12 +394,12 @@ impl OpenMlsCrypto for CryptoProvider {
     }
 }
 
-fn hpke_config(config: HpkeConfig) -> hpke_rs::Hpke<HpkeLibcrux> {
-    let kem = hpke_kem(config.0);
+fn hpke_config(config: HpkeConfig) -> Result<hpke_rs::Hpke<HpkeLibcrux>, CryptoError> {
+    let kem = hpke_kem(config.0)?;
     let kdf = hpke_kdf(config.1);
     let aead = hpke_aead(config.2);
 
-    hpke_rs::Hpke::new(hpke_rs::Mode::Base, kem, kdf, aead)
+    Ok(hpke_rs::Hpke::new(hpke_rs::Mode::Base, kem, kdf, aead))
 }
 
 fn hpke_kdf(kdf: HpkeKdfType) -> hpke_rs_crypto::types::KdfAlgorithm {
@@ -392,14 +410,17 @@ fn hpke_kdf(kdf: HpkeKdfType) -> hpke_rs_crypto::types::KdfAlgorithm {
     }
 }
 
-fn hpke_kem(kem: HpkeKemType) -> hpke_rs_crypto::types::KemAlgorithm {
+fn hpke_kem(kem: HpkeKemType) -> Result<hpke_rs_crypto::types::KemAlgorithm, CryptoError> {
     match kem {
-        HpkeKemType::DhKemP256 => hpke_rs_crypto::types::KemAlgorithm::DhKemP256,
-        HpkeKemType::DhKemP384 => hpke_rs_crypto::types::KemAlgorithm::DhKemP384,
-        HpkeKemType::DhKemP521 => hpke_rs_crypto::types::KemAlgorithm::DhKemP521,
-        HpkeKemType::DhKem25519 => hpke_rs_crypto::types::KemAlgorithm::DhKem25519,
-        HpkeKemType::DhKem448 => hpke_rs_crypto::types::KemAlgorithm::DhKem448,
-        HpkeKemType::XWingKemDraft6 => hpke_rs_crypto::types::KemAlgorithm::XWingDraft06,
+        HpkeKemType::DhKemP256 => Ok(hpke_rs_crypto::types::KemAlgorithm::DhKemP256),
+        HpkeKemType::DhKemP384 => Ok(hpke_rs_crypto::types::KemAlgorithm::DhKemP384),
+        HpkeKemType::DhKemP521 => Ok(hpke_rs_crypto::types::KemAlgorithm::DhKemP521),
+        HpkeKemType::DhKem25519 => Ok(hpke_rs_crypto::types::KemAlgorithm::DhKem25519),
+        HpkeKemType::DhKem448 => Ok(hpke_rs_crypto::types::KemAlgorithm::DhKem448),
+        #[cfg(feature = "xwing")]
+        HpkeKemType::XWingKemDraft6 => Ok(hpke_rs_crypto::types::KemAlgorithm::XWingDraft06),
+        #[cfg(not(feature = "xwing"))]
+        HpkeKemType::XWingKemDraft6 => Err(CryptoError::UnsupportedCiphersuite),
     }
 }
 
@@ -453,3 +474,71 @@ impl<Rng: RngCore> RngCore for GuardedRng<'_, Rng> {
 }
 
 impl<Rng: RngCore + CryptoRng> CryptoRng for GuardedRng<'_, Rng> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openmls_traits::types::Ciphersuite;
+
+    #[cfg(not(feature = "xwing"))]
+    #[test]
+    fn test_xwing_gated_by_feature() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        assert_eq!(
+            provider.supports(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            Err(CryptoError::UnsupportedCiphersuite),
+            "X-Wing must not be supported when the `xwing` feature is disabled",
+        );
+        let suites = provider.supported_ciphersuites();
+        assert!(
+            !suites.contains(&Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            "supported_ciphersuites() must not list X-Wing without `xwing` feature, got {suites:?}",
+        );
+    }
+
+    #[cfg(feature = "xwing")]
+    #[test]
+    fn test_xwing_available_with_feature() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        assert_eq!(
+            provider.supports(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            Ok(()),
+            "X-Wing must be supported when the `xwing` feature is enabled",
+        );
+        let suites = provider.supported_ciphersuites();
+        assert!(
+            suites.contains(&Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            "supported_ciphersuites() must list X-Wing when `xwing` is enabled, got {suites:?}",
+        );
+    }
+
+    #[test]
+    fn test_classical_chacha20_supported_regardless_of_xwing() {
+        // The libcrux provider's `supports()` requires HPKE AEAD =
+        // ChaCha20Poly1305, so this is the only fully-classical suite the
+        // provider claims today. The point of the test is to confirm the
+        // X-Wing feature gate doesn't affect classical support either way.
+        let provider = CryptoProvider::new().expect("crypto provider");
+        assert_eq!(
+            provider.supports(Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519),
+            Ok(()),
+            "libcrux provider must support classical ChaCha20Poly1305 ciphersuite",
+        );
+    }
+
+    #[test]
+    fn test_libcrux_rejects_mldsa() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        for scheme in [
+            SignatureScheme::MLDSA44,
+            SignatureScheme::MLDSA65,
+            SignatureScheme::MLDSA87,
+        ] {
+            assert_eq!(
+                provider.signature_key_gen(scheme).err(),
+                Some(CryptoError::UnsupportedSignatureScheme),
+                "libcrux provider must not implement ML-DSA scheme {scheme:?}"
+            );
+        }
+    }
+}
