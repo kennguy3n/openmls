@@ -365,6 +365,28 @@ impl MlsGroup {
         }
     }
 
+    /// Force the group into [`MlsGroupState::Inactive`].
+    ///
+    /// MLS itself only transitions a group to `Inactive` when this client is
+    /// removed from membership (RFC 9420 §11). The KChat orchestration layer
+    /// (PHASES.md Phase 3) needs to seal a group as read-only after a `ReInit`
+    /// proposal is committed and merged — at that point the group is supposed
+    /// to be terminated even though we were not removed from it. This helper
+    /// performs that transition explicitly.
+    ///
+    /// `Inactive` is a terminal state; calling this on an already-inactive
+    /// group is a no-op.
+    pub fn set_inactive<Storage: StorageProvider>(
+        &mut self,
+        storage: &Storage,
+    ) -> Result<(), Storage::Error> {
+        if matches!(self.group_state, MlsGroupState::Inactive) {
+            return Ok(());
+        }
+        self.group_state = MlsGroupState::Inactive;
+        storage.write_group_state(self.group_id(), &self.group_state)
+    }
+
     /// Sets the `group_state` to [`MlsGroupState::Operational`], thus clearing
     /// any potentially pending commits.
     ///

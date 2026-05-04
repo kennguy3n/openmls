@@ -86,6 +86,14 @@ cargo test -p openmls_libcrux_crypto --features xwing      # with xwing
 # Trait-level tests (draft-codepoint helpers, ML-DSA enum, ...).
 cargo test -p openmls_traits
 
+# PQ-specific integration test files.
+cargo test -p openmls --test pq_capability_tests
+cargo test -p openmls --test pq_downgrade_tests
+cargo test -p openmls --test pq_interop_tests
+cargo test -p openmls --test pq_kat_tests
+cargo test -p openmls --test pq_lifecycle_tests
+cargo test -p openmls --test multi_ciphersuite_public_api
+
 # Lint + format (matches CI).
 cargo fmt --all -- --check
 cargo clippy --workspace --tests -- -D warnings
@@ -132,12 +140,20 @@ and `messages` modules respectively.
   — Phase 2 selector that picks the highest mode every peer supports
   plus the best ciphersuite for that mode.
 - [`group::apq_commit`](./openmls/src/group/apq_commit.rs)
-  — `prepare_full_commit` and `prepare_partial_commit` skeletons that
-  validate preconditions and policy gating today; live MLS wiring lands
-  later.
+  — `prepare_full_commit` and `prepare_partial_commit` wired to
+  `MlsGroup::commit_builder` and the MLS exporter (`APQ_PSK_LABEL =
+  "kchat-apq-psk"`).
 - [`messages::apq_welcome::ApqWelcome`](./openmls/src/messages/apq_welcome.rs)
   — Phase 4 bootstrap envelope bundling the T and PQ `Welcome`s, the
   `ApqInfo`, and the initial `apq_psk` `PreSharedKeyId`.
+- [`group::reinit_upgrade`](./openmls/src/group/reinit_upgrade.rs)
+  — Phase 3 ReInit upgrade path (`propose_reinit`, `commit_reinit`,
+  `complete_reinit`) for upgrading 1:1 and small classical groups to
+  PQ via a Resumption(ReInit) PSK.
+- [`group::apq_resync`](./openmls/src/group/apq_resync.rs)
+  — Recovery (`detect_desync`, `resync_from_pq`, `resync_from_t`,
+  `force_resync`) for clients that miss one half of a FULL commit
+  pair (`MAX_EPOCH_DRIFT = 1`).
 
 ## Supported ciphersuites
 

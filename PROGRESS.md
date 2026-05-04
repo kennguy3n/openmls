@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 5–6 — In progress | ~25%**
+**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~30%**
 
 ## Version Targets
 
@@ -80,19 +80,21 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 #### APQ-MLS combiner
 
 - [x] Design the `KChatMlsConversation` orchestration struct
-      (`openmls/src/group/kchat_conversation.rs`). Skeleton with classical /
-      direct-PQ / APQ constructors, mode helpers, pending-commit tracking,
-      and `apq_info` linkage.
-- [ ] Implement dual-session (T + PQ) group management — orchestration
-      skeleton landed; live wiring against `MlsGroup` is still pending.
-- [x] Implement the FULL commit flow skeleton
-      (`openmls/src/group/apq_commit.rs`):
-      preconditions, in-flight tracking, error surface. PQ commit → PSK
-      derivation → T commit with PSK still returns `NotImplemented` until
-      the live MLS wiring lands.
-- [x] Implement the PARTIAL commit flow skeleton
-      (`openmls/src/group/apq_commit.rs`): policy gate, in-flight
-      tracking, error surface. Live MLS wiring still pending.
+      (`openmls/src/group/kchat_conversation.rs`). Constructors for
+      classical, direct-PQ, and APQ modes; mode helpers; pending-commit
+      tracking; `apq_info` linkage; and a live `bootstrap_apq` method
+      (Phase 4) that links a freshly-built PQ group to an existing T
+      group, generates the `apq_psk`, and emits an `ApqWelcome`.
+- [x] Implement dual-session (T + PQ) group management. The FULL/PARTIAL
+      commit flows now drive real `MlsGroup::commit_builder` calls and
+      wire the apq_psk via the MLS exporter.
+- [x] Implement the FULL commit flow
+      (`openmls/src/group/apq_commit.rs`): PQ-side commit, exporter-based
+      apq_psk derivation, `PreSharedKeyId` storage, and T-side commit with
+      a PSK proposal.
+- [x] Implement the PARTIAL commit flow
+      (`openmls/src/group/apq_commit.rs`): T-session-only commit when
+      policy permits.
 - [x] Implement the `APQInfo` extension and downgrade prevention
       (`openmls/src/extensions/apq_info.rs`,
       `openmls/src/group/no_downgrade.rs`).
@@ -113,8 +115,11 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       (`openmls/src/key_packages/multi_ciphersuite.rs`).
 - [x] Implement conversation upgrade logic for new conversations
       (`openmls/src/group/conversation_upgrade.rs`).
-- [ ] Implement the MLS `ReInit` flow for 1:1 and small group upgrades.
-- [ ] Implement APQ bootstrap for larger group upgrades.
+- [x] Implement the MLS `ReInit` flow for 1:1 and small group upgrades
+      (`openmls/src/group/reinit_upgrade.rs`): `propose_reinit`,
+      `commit_reinit`, `complete_reinit` and the resumption-PSK helpers.
+- [x] Implement APQ bootstrap for larger group upgrades
+      (`KChatMlsConversation::bootstrap_apq`).
 - [x] Implement the FULL/PARTIAL commit policy engine
       (`openmls/src/group/pq_policy.rs`).
 - [x] Implement no-downgrade enforcement rules
@@ -132,12 +137,19 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 #### Testing and validation
 
-- [ ] Classical / PQ / APQ interop test vectors.
+- [x] Classical / PQ / APQ interop test scaffolding
+      (`openmls/tests/pq_interop_tests.rs`).
+- [x] PQ KAT framework with placeholder X-Wing/ML-KEM/ML-DSA vectors
+      (`openmls/tests/pq_kat_tests.rs`,
+      `openmls/tests/pq_kat_vectors/`).
+- [x] End-to-end APQ lifecycle test coverage
+      (`openmls/tests/pq_lifecycle_tests.rs`).
 - [x] Downgrade rejection tests
       (`openmls/tests/pq_downgrade_tests.rs` — 11 integration tests).
 - [ ] PQ KeyPackage storage load testing.
 - [ ] Welcome fanout load testing at target scale.
-- [ ] Client resync after a missed PQ/T commit pair.
+- [x] Client resync after a missed PQ/T commit pair
+      (`openmls/src/group/apq_resync.rs`).
 - [ ] External security review of APQ orchestration.
 
 ## Known Gaps
@@ -147,12 +159,63 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | X-Wing only, draft codepoint `0x004D`            | Not sufficient for final standards-based deployment                   |
 | ~~RustCrypto provider panics on X-Wing~~         | Fixed: RustCrypto returns `UnsupportedCiphersuite` instead of panicking |
 | No ML-DSA signature support in any provider      | PQ confidentiality ≠ PQ authenticity (enum + helpers landed; no provider impl) |
-| No APQ-MLS combiner                              | Needed for bandwidth-efficient PQ at scale                            |
+| ~~No APQ-MLS combiner~~                          | Combiner scaffolding (FULL/PARTIAL commits, ApqInfo, bootstrap, ReInit, resync) is wired against `MlsGroup`; live multi-client soak tests still pending |
 | No migration state machine                       | Millions of users need per-device, per-conversation upgrade logic     |
 | No server-side capability protocol               | Required for staged rollout                                           |
 | No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs                          |
 
 ## Changelog
+
+### 2026-05-04 (orchestration wiring)
+
+- Wired the FULL commit flow in `openmls/src/group/apq_commit.rs` to
+  real `MlsGroup` operations: PQ-side commit via `commit_builder`,
+  apq_psk derivation via the MLS exporter (`APQ_PSK_LABEL =
+  "kchat-apq-psk"`, 32-byte output), `PreSharedKeyId` storage on the
+  provider, and a T-side commit that consumes the PSK as a proposal.
+  Pending-FULL-commit tracking is set only after the PQ commit
+  succeeds.
+- Wired the PARTIAL commit flow in `openmls/src/group/apq_commit.rs`
+  to drive a T-session-only commit through `commit_builder` while
+  leaving the PQ session untouched.
+- Added `KChatMlsConversation::bootstrap_apq` in
+  `openmls/src/group/kchat_conversation.rs` (Phase 4): adds T-group
+  membership to a freshly-created PQ group, derives `apq_psk`,
+  produces an `ApqInfo` and `ApqWelcome`, and installs the PQ session
+  on the conversation. `ApqBootstrapError` enumerates 14 distinct
+  precondition / crypto / membership failure modes.
+- Added `openmls/src/group/reinit_upgrade.rs` (Phase 3) for the MLS
+  ReInit upgrade path: `propose_reinit`, `commit_reinit`,
+  `complete_reinit`. Derives the Resumption(ReInit) PSK via the MLS
+  exporter (`REINIT_PSK_LABEL = "kchat-reinit-psk"`) and transitions
+  the old group to read-only.
+- Added `openmls/src/group/apq_resync.rs` for client recovery after a
+  missed half of a FULL commit pair: `detect_desync`,
+  `resync_from_pq`, `resync_from_t`, and `force_resync`. Exposes
+  `MAX_EPOCH_DRIFT = 1` and emits a fresh `apq_psk` after a successful
+  PQ-side resync.
+- Added `openmls/tests/pq_kat_tests.rs` (7 tests) and a
+  `openmls/tests/pq_kat_vectors/` directory with placeholder JSON
+  vector files for X-Wing, ML-KEM, and ML-DSA. Includes JSON schema,
+  hex decoding utilities, and an X-Wing runner gated behind the
+  `xwing` feature.
+- Added `openmls/tests/pq_interop_tests.rs` (8 tests) covering
+  classical group creation, mixed-provider rejection (PQ group
+  creation fails on RustCrypto), classical-only joiner rejection in
+  PqConfidentiality conversations, and Welcome roundtrip across
+  provider boundaries.
+- Added `openmls/tests/pq_lifecycle_tests.rs` (17 tests) covering the
+  end-to-end APQ lifecycle: classical → PQ capability upgrade → mode
+  selection → bootstrap → PARTIAL/FULL policy → no-downgrade
+  enforcement → epoch consistency.
+- Added `openmls/tests/multi_ciphersuite_public_api.rs` (4 tests)
+  exercising the public `MultiCiphersuiteKeyPackages` API the way a
+  downstream KChat orchestration layer would, plus four
+  X-Wing-feature-gated tests inside
+  `openmls/src/key_packages/multi_ciphersuite.rs` that drive PQ
+  KeyPackage generation through the libcrux provider, assert size
+  ratios against classical KPs, exercise the per-device cap, and round
+  the resulting KP through `MlsGroup::new`.
 
 ### 2026-05-04 (orchestration layer)
 

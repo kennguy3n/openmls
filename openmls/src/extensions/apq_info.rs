@@ -38,9 +38,20 @@ pub struct ApqInfo {
     pub t_group_id: GroupId,
     /// Group ID of the PQ session.
     pub pq_group_id: GroupId,
-    /// Last synchronized epoch on the T session.
+    /// FULL-commit synchronization counter as observed on the T side.
+    ///
+    /// **Not** the live MLS epoch of the T group. This is a counter that
+    /// advances by 1 on every FULL commit; both `t_epoch` and `pq_epoch`
+    /// are seeded at bootstrap from the PQ group's initial epoch and move
+    /// together thereafter. Decoupling this from the absolute T-group
+    /// epoch lets long-running classical groups bootstrap into APQ
+    /// without the recorded drift check failing.
     pub t_epoch: u64,
-    /// Last synchronized epoch on the PQ session.
+    /// FULL-commit synchronization counter as observed on the PQ side.
+    ///
+    /// See [`Self::t_epoch`] for the full semantics. The two counters
+    /// stay equal between FULL commits and may differ by at most
+    /// [`MAX_EPOCH_DRIFT`] while a FULL commit is in flight.
     pub pq_epoch: u64,
     /// Ciphersuite of the T session.
     pub t_ciphersuite: Ciphersuite,
@@ -338,6 +349,22 @@ mod tests {
             info.matches_groups(&group_id(0xAA), &group_id(0xCC)),
             Err(ApqInfoError::GroupIdMismatch)
         );
+    }
+
+    #[test]
+    fn sync_counter_seeded_from_pq_epoch_is_valid() {
+        // `bootstrap_apq` seeds both `t_epoch` and `pq_epoch` from the
+        // PQ group's epoch (the synchronization anchor), regardless of
+        // how far the live T group has advanced. Validate that any such
+        // seed value passes — there is no implicit "absolute MLS epoch"
+        // assumption hiding in the validator.
+        for seed in [0u64, 1, 5, 1_000, u64::MAX / 2] {
+            let mut info = pq_apq_info();
+            info.t_epoch = seed;
+            info.pq_epoch = seed;
+            info.validate()
+                .unwrap_or_else(|e| panic!("seed {seed} should be a valid APQ sync counter: {e}"));
+        }
     }
 
     #[test]

@@ -163,7 +163,9 @@ impl TlsSizeTrait for ApqWelcome {
             Some(p) => 1 + p.tls_serialized_len(),
             None => 1,
         };
-        t_welcome_len + self.pq_welcome.tls_serialized_len() + self.apq_info.tls_serialized_len()
+        t_welcome_len
+            + self.pq_welcome.tls_serialized_len()
+            + self.apq_info.tls_serialized_len()
             + psk_len
     }
 }
@@ -302,10 +304,7 @@ mod tests {
         // Re-pin the apq_info so the validate() inner check fires (otherwise
         // ApqInfo::validate flags the mode/cs mismatch first).
         aw.apq_info.pq_ciphersuite = xwing_cs();
-        assert_eq!(
-            aw.validate(),
-            Err(ApqWelcomeError::PqCiphersuiteMismatch)
-        );
+        assert_eq!(aw.validate(), Err(ApqWelcomeError::PqCiphersuiteMismatch));
     }
 
     #[test]
@@ -316,10 +315,7 @@ mod tests {
             pq_apq_info(),
             dummy_psk_id(),
         );
-        assert_eq!(
-            aw.validate(),
-            Err(ApqWelcomeError::TCiphersuiteMismatch)
-        );
+        assert_eq!(aw.validate(), Err(ApqWelcomeError::TCiphersuiteMismatch));
     }
 
     #[test]

@@ -33,8 +33,8 @@ use crate::{
 #[cfg(test)]
 use openmls_traits::random::OpenMlsRand;
 
-pub(crate) mod codec;
 pub mod apq_welcome;
+pub(crate) mod codec;
 pub mod external_proposals;
 pub mod group_info;
 pub mod proposals;

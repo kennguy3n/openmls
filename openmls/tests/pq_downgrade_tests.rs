@@ -52,10 +52,7 @@ fn pq_required_rejects_classical_only_joiner_key_package() {
     // joiner whose KeyPackage is bound to a classical-only suite.
     let result = validate_joiner_key_package(SecurityMode::PqConfidentiality, classical_cs());
     match result {
-        Err(DowngradeError::JoinerKeyPackageNotPq {
-            kp_mode,
-            required,
-        }) => {
+        Err(DowngradeError::JoinerKeyPackageNotPq { kp_mode, required }) => {
             assert_eq!(kp_mode, SecurityMode::Classical);
             assert_eq!(required, SecurityMode::PqConfidentiality);
         }

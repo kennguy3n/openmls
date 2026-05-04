@@ -12,24 +12,60 @@
 //!   refreshes and the like — only allowed when the conversation's
 //!   [`PqPolicy`] permits it for the given trigger.
 //!
-//! ## Skeleton scope
+//! ## Wiring
 //!
-//! This module ships the **flow-level scaffolding** — preconditions, state
-//! checks, error surface, and result shapes — but does not yet drive the
-//! underlying [`MlsGroup::commit_builder`] for either session. That wiring is
-//! deferred to Phase 4/5 implementation work and tracked in
-//! [`PROGRESS.md`](../../../PROGRESS.md). Both `prepare_full_commit` and
-//! `prepare_partial_commit` therefore short-circuit with
-//! [`ApqCommitError::NotImplemented`] after the policy/state checks succeed,
-//! so callers and downstream tests can already exercise the *flow logic* —
-//! mode mismatch, missing groups, policy violations — without depending on
-//! crypto primitives that aren't wired up yet.
+//! [`prepare_full_commit`] and [`prepare_partial_commit`] now drive the
+//! underlying [`MlsGroup::commit_builder`] for both sessions:
+//!
+//! 1. Run all preconditions, mode/policy/in-flight checks first; failures
+//!    short-circuit before we touch any group state.
+//! 2. For FULL: stage and merge the PQ commit so the new epoch's exporter
+//!    is available, derive `apq_psk` via [`MlsGroup::export_secret`] using
+//!    the [`APQ_PSK_LABEL`] domain separator, generate a fresh
+//!    [`PreSharedKeyId`] (random nonce + random ID), persist the PSK
+//!    bundle in the provider's storage, flip
+//!    [`KChatMlsConversation::set_pending_full_commit`] to `true`, then
+//!    stage the T commit with a `PreSharedKey(apq_psk_id)` proposal.
+//! 3. For PARTIAL: stage the T commit only. The PQ session is left
+//!    untouched (no exporter call, no new PSK).
+//!
+//! Callers are responsible for delivering the resulting [`MlsMessageOut`]s
+//! to peers and merging the T pending commit ([`MlsGroup::merge_pending_commit`])
+//! once delivery is acknowledged. The PQ commit is **already merged
+//! locally** when [`prepare_full_commit`] returns — that is required so the
+//! exporter can derive `apq_psk` from the new epoch — and the
+//! pending-FULL-commit flag stays `true` until the orchestration calls
+//! [`KChatMlsConversation::record_full_commit`].
+//!
+//! See [`PHASES.md`](../../../PHASES.md) Phase 4/5.
+
+use openmls_traits::{random::OpenMlsRand, signatures::Signer};
 
 use crate::framing::MlsMessageOut;
 use crate::group::kchat_conversation::KChatMlsConversation;
 use crate::group::pq_policy::{CommitTrigger, CommitType};
-use crate::messages::proposals::Proposal;
+use crate::messages::proposals::{PreSharedKeyProposal, Proposal};
 use crate::schedule::psk::PreSharedKeyId;
+use crate::storage::OpenMlsProvider;
+
+/// Domain-separator label used when deriving `apq_psk` via
+/// [`MlsGroup::export_secret`] from the PQ session.
+///
+/// All clients in an APQ conversation must agree on this label byte-for-byte
+/// — it is part of the FULL commit choreography defined in
+/// [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) (APQ-MLS Combiner
+/// Architecture).
+pub const APQ_PSK_LABEL: &str = "kchat-apq-psk";
+
+/// Length, in bytes, of the `apq_psk` material exported from the PQ
+/// session. Matches the SHA-256 output size used by the current PQ
+/// ciphersuites (X-Wing → SHA-256).
+pub const APQ_PSK_LENGTH: usize = 32;
+
+/// Length, in bytes, of the random `psk_id` blob embedded in
+/// [`PreSharedKeyId::external`]. Long enough to make collisions
+/// negligible across the lifetime of a conversation.
+pub const APQ_PSK_ID_LENGTH: usize = 16;
 
 /// Result of a successfully prepared FULL commit.
 ///
@@ -98,37 +134,80 @@ pub enum ApqCommitError {
     /// Another FULL commit handshake is already mid-flight.
     #[error("another FULL commit is already in flight; complete it before starting a new one")]
     FullCommitInFlight,
-    /// The full FULL/PARTIAL commit pipeline (deriving `apq_psk`, building
-    /// MLS commits) is not yet implemented in this skeleton.
-    #[error(
-        "APQ commit pipeline is not yet implemented; preconditions passed but the underlying commit machinery is deferred to Phase 4/5"
-    )]
-    NotImplemented,
+
+    /// Building, validating, or staging the **PQ** commit failed.
+    ///
+    /// The error string includes the underlying [`CreateCommitError`] /
+    /// [`CommitBuilderStageError`] description; we keep it as a string so
+    /// [`ApqCommitError`] does not have to carry a generic
+    /// `StorageError` parameter.
+    #[error("PQ commit failed: {0}")]
+    PqCommitFailed(String),
+
+    /// Merging the local PQ pending commit failed. After this error the
+    /// PQ session is in a partially-staged state; callers should treat
+    /// this as a transient infrastructure failure and trigger
+    /// [`crate::group::apq_resync::force_resync`] or equivalent recovery.
+    #[error("PQ merge failed: {0}")]
+    PqMergeFailed(String),
+
+    /// Deriving `apq_psk` from the PQ session via
+    /// [`MlsGroup::export_secret`] failed.
+    #[error("PQ exporter derivation failed: {0}")]
+    PqExportSecretFailed(String),
+
+    /// Persisting the derived `apq_psk` bundle in the provider's PSK
+    /// store failed.
+    #[error("apq_psk store failed: {0}")]
+    PskStoreFailed(String),
+
+    /// Random byte generation (PSK ID / nonce) failed.
+    #[error("random generation failed: {0}")]
+    RandomGenerationFailed(String),
+
+    /// Building, validating, or staging the **T** commit failed. The PQ
+    /// half of the FULL commit has already been merged at this point —
+    /// the conversation is left with `pending_full_commit == true` and
+    /// requires resync.
+    #[error("T commit failed: {0}")]
+    TCommitFailed(String),
 }
 
 /// Validate FULL-commit preconditions and produce a [`FullCommitResult`].
 ///
-/// Steps performed (skeleton):
+/// Steps performed:
 ///
 /// 1. Check that `conversation` is APQ (mode is non-classical AND both T and
 ///    PQ groups are present AND APQInfo is set).
 /// 2. Check that the active [`PqPolicy`] requires a FULL commit for
 ///    `trigger` (i.e. `requires_full(trigger)`).
 /// 3. Check that no FULL commit handshake is already in flight.
-/// 4. Bail with [`ApqCommitError::NotImplemented`] — the actual commit
-///    machinery (PQ commit → exporter-derived `apq_psk` → T commit with
-///    `PreSharedKey(apq_psk_id)`) is not wired in this skeleton.
+/// 4. Stage the PQ commit (with any caller-supplied `proposals`) and
+///    merge it locally so the new epoch's exporter is available.
+/// 5. Derive `apq_psk` via [`MlsGroup::export_secret`] using
+///    [`APQ_PSK_LABEL`] and the conversation ID as context, store it in
+///    the provider's PSK store, and flip
+///    [`KChatMlsConversation::set_pending_full_commit`] to `true`.
+/// 6. Stage the T commit with a `PreSharedKey(apq_psk_id)` proposal plus
+///    the caller-supplied `proposals`. The T commit is **not** merged
+///    here — callers merge it once delivery to peers is acknowledged.
 ///
-/// `_proposals`, `_provider`, and `_signer` are part of the eventual public
-/// signature and accepted here so call sites can already be written against
-/// the final shape.
+/// The PQ commit must be sent before the T commit so peers can derive the
+/// matching PSK on their side before processing the T commit.
+///
+/// See [`PHASES.md`](../../../PHASES.md) Phase 4/5.
 pub fn prepare_full_commit<P, S>(
     conversation: &mut KChatMlsConversation,
     trigger: CommitTrigger,
-    _proposals: Vec<Proposal>,
-    _provider: &P,
-    _signer: &S,
-) -> Result<FullCommitResult, ApqCommitError> {
+    proposals: Vec<Proposal>,
+    provider: &P,
+    signer: &S,
+) -> Result<FullCommitResult, ApqCommitError>
+where
+    P: OpenMlsProvider,
+    S: Signer,
+{
+    // --- 1. Preconditions ----------------------------------------------------
     if !conversation.is_apq() {
         return Err(ApqCommitError::NotApqConversation);
     }
@@ -153,35 +232,127 @@ pub fn prepare_full_commit<P, S>(
         CommitType::None => return Err(ApqCommitError::TriggerIsNoCommit { trigger }),
     }
 
-    // Once the live MLS wiring lands, this is where the PQ commit gets sent
-    // and `conversation.set_pending_full_commit(true)` is called — i.e. the
-    // flag must only flip once a commit is actually in flight on the wire.
-    // Setting it before a guaranteed-failure return would leave the
-    // conversation permanently stuck (every subsequent `prepare_full_commit`
-    // / `prepare_partial_commit` would short-circuit with
-    // `FullCommitInFlight`), so the skeleton deliberately leaves the flag
-    // untouched.
-    Err(ApqCommitError::NotImplemented)
+    // Snapshot inputs that we need later but that would otherwise conflict
+    // with the `&mut MlsGroup` borrows below.
+    let conversation_id = conversation.conversation_id().to_vec();
+    let pq_ciphersuite = conversation
+        .pq_group()
+        .expect("pq_group present (precondition)")
+        .ciphersuite();
+
+    // --- 2. PQ commit --------------------------------------------------------
+    let pq_proposals = proposals.clone();
+    let pq_commit = {
+        let pq_group = conversation
+            .pq_group_mut()
+            .expect("pq_group present (precondition)");
+        let bundle = pq_group
+            .commit_builder()
+            .consume_proposal_store(true)
+            .add_proposals(pq_proposals)
+            .load_psks(provider.storage())
+            .map_err(|e| ApqCommitError::PqCommitFailed(format!("load_psks: {e}")))?
+            .build(provider.rand(), provider.crypto(), signer, |_| true)
+            .map_err(|e| ApqCommitError::PqCommitFailed(format!("build: {e}")))?
+            .stage_commit(provider)
+            .map_err(|e| ApqCommitError::PqCommitFailed(format!("stage_commit: {e}")))?;
+        bundle.into_commit()
+    };
+
+    // --- 3. Merge PQ pending commit so the new exporter is in scope ----------
+    {
+        let pq_group = conversation
+            .pq_group_mut()
+            .expect("pq_group present (precondition)");
+        pq_group
+            .merge_pending_commit(provider)
+            .map_err(|e| ApqCommitError::PqMergeFailed(format!("{e}")))?;
+    }
+
+    // --- 4. Derive apq_psk ---------------------------------------------------
+    let apq_psk = conversation
+        .pq_group()
+        .expect("pq_group present (precondition)")
+        .export_secret(
+            provider.crypto(),
+            APQ_PSK_LABEL,
+            &conversation_id,
+            APQ_PSK_LENGTH,
+        )
+        .map_err(|e| ApqCommitError::PqExportSecretFailed(format!("{e}")))?;
+
+    let psk_id_bytes = provider
+        .rand()
+        .random_vec(APQ_PSK_ID_LENGTH)
+        .map_err(|e| ApqCommitError::RandomGenerationFailed(format!("psk_id: {e}")))?;
+    let psk_nonce = provider
+        .rand()
+        .random_vec(pq_ciphersuite.hash_length())
+        .map_err(|e| ApqCommitError::RandomGenerationFailed(format!("psk_nonce: {e}")))?;
+    let apq_psk_id = PreSharedKeyId::external(psk_id_bytes, psk_nonce);
+
+    apq_psk_id
+        .store(provider, &apq_psk)
+        .map_err(|e| ApqCommitError::PskStoreFailed(format!("{e}")))?;
+
+    // --- 5. Flip pending flag (PQ side is committed locally) -----------------
+    conversation.set_pending_full_commit(true);
+
+    // --- 6. T commit with PreSharedKey proposal ------------------------------
+    let mut t_proposals = Vec::with_capacity(1 + proposals.len());
+    t_proposals.push(Proposal::psk(PreSharedKeyProposal::new(apq_psk_id.clone())));
+    t_proposals.extend(proposals);
+
+    let t_commit = {
+        let t_group = conversation
+            .t_group_mut()
+            .expect("t_group present (precondition)");
+        let bundle = t_group
+            .commit_builder()
+            .consume_proposal_store(true)
+            .add_proposals(t_proposals)
+            .load_psks(provider.storage())
+            .map_err(|e| ApqCommitError::TCommitFailed(format!("load_psks: {e}")))?
+            .build(provider.rand(), provider.crypto(), signer, |_| true)
+            .map_err(|e| ApqCommitError::TCommitFailed(format!("build: {e}")))?
+            .stage_commit(provider)
+            .map_err(|e| ApqCommitError::TCommitFailed(format!("stage_commit: {e}")))?;
+        bundle.into_commit()
+    };
+
+    Ok(FullCommitResult {
+        pq_commit,
+        apq_psk_id,
+        t_commit,
+    })
 }
 
 /// Validate PARTIAL-commit preconditions and produce a [`PartialCommitResult`].
 ///
-/// Steps performed (skeleton):
+/// Steps performed:
 ///
 /// 1. Check that `conversation` has a T session.
 /// 2. Check that the active [`PqPolicy`] permits PARTIAL for `trigger`
 ///    (i.e. `allows_partial(trigger)`).
 /// 3. Check that no FULL commit handshake is already in flight (PARTIAL is
 ///    only safe when the two sessions are in sync).
-/// 4. Bail with [`ApqCommitError::NotImplemented`] — the T-session commit
-///    machinery is deferred to Phase 4/5.
+/// 4. Stage the T commit (and only the T commit). The PQ session is left
+///    untouched.
+///
+/// The PQ session is **not** modified — no exporter call, no PSK
+/// derivation, no PQ commit on the wire. PARTIAL is the cheap path used
+/// for routine PCS / refresh triggers when the policy allows it.
 pub fn prepare_partial_commit<P, S>(
     conversation: &mut KChatMlsConversation,
     trigger: CommitTrigger,
-    _proposals: Vec<Proposal>,
-    _provider: &P,
-    _signer: &S,
-) -> Result<PartialCommitResult, ApqCommitError> {
+    proposals: Vec<Proposal>,
+    provider: &P,
+    signer: &S,
+) -> Result<PartialCommitResult, ApqCommitError>
+where
+    P: OpenMlsProvider,
+    S: Signer,
+{
     if conversation.t_group().is_none() {
         return Err(ApqCommitError::NoTSession);
     }
@@ -195,30 +366,38 @@ pub fn prepare_partial_commit<P, S>(
         CommitType::None => return Err(ApqCommitError::TriggerIsNoCommit { trigger }),
     }
 
-    Err(ApqCommitError::NotImplemented)
+    let t_commit = {
+        let t_group = conversation
+            .t_group_mut()
+            .expect("t_group present (precondition)");
+        let bundle = t_group
+            .commit_builder()
+            .consume_proposal_store(true)
+            .add_proposals(proposals)
+            .load_psks(provider.storage())
+            .map_err(|e| ApqCommitError::TCommitFailed(format!("load_psks: {e}")))?
+            .build(provider.rand(), provider.crypto(), signer, |_| true)
+            .map_err(|e| ApqCommitError::TCommitFailed(format!("build: {e}")))?
+            .stage_commit(provider)
+            .map_err(|e| ApqCommitError::TCommitFailed(format!("stage_commit: {e}")))?;
+        bundle.into_commit()
+    };
+
+    Ok(PartialCommitResult { t_commit })
 }
 
 #[cfg(test)]
 mod tests {
     //! Skeleton tests. These exercise the **flow logic** (mode checks,
     //! policy gating, in-flight detection) without driving real `MlsGroup`
-    //! commits. The error surface is what callers will rely on long before
-    //! the real commit pipeline lands, so it gets the most coverage here.
+    //! commits — those live in `tests/pq_lifecycle_tests.rs` and the unit
+    //! tests in [`super::tests::with_real_groups`].
     use super::*;
     use crate::ciphersuite::SecurityMode;
     use crate::group::pq_policy::PqPolicy;
 
-    /// A struct literally just to give `prepare_*_commit` something to bind
-    /// the generic provider/signer parameters to in tests. The generic
-    /// signature is intentionally permissive in this skeleton.
-    struct DummyProvider;
-    struct DummySigner;
-
     #[test]
     fn full_commit_error_on_non_apq_conversation_renders_clearly() {
-        // We can't actually build a real MlsGroup in a unit test, so we
-        // assert the error shape directly. The full integration test lives
-        // in `tests/pq_downgrade_tests.rs`.
         let err = ApqCommitError::NotApqConversation;
         assert_eq!(
             format!("{err}"),
@@ -275,9 +454,44 @@ mod tests {
     }
 
     #[test]
-    fn not_implemented_error_renders_clearly() {
-        let err = ApqCommitError::NotImplemented;
-        assert!(format!("{err}").contains("not yet implemented"));
+    fn pq_commit_failed_error_renders_with_underlying_string() {
+        let err = ApqCommitError::PqCommitFailed("build: boom".into());
+        let rendered = format!("{err}");
+        assert!(rendered.contains("PQ commit failed"));
+        assert!(rendered.contains("boom"));
+    }
+
+    #[test]
+    fn t_commit_failed_error_renders_with_underlying_string() {
+        let err = ApqCommitError::TCommitFailed("stage_commit: boom".into());
+        let rendered = format!("{err}");
+        assert!(rendered.contains("T commit failed"));
+        assert!(rendered.contains("boom"));
+    }
+
+    #[test]
+    fn pq_export_secret_failed_error_renders_clearly() {
+        let err = ApqCommitError::PqExportSecretFailed("no exporter".into());
+        let rendered = format!("{err}");
+        assert!(rendered.contains("PQ exporter derivation failed"));
+        assert!(rendered.contains("no exporter"));
+    }
+
+    #[test]
+    fn psk_store_failed_error_renders_clearly() {
+        let err = ApqCommitError::PskStoreFailed("disk full".into());
+        let rendered = format!("{err}");
+        assert!(rendered.contains("apq_psk store failed"));
+        assert!(rendered.contains("disk full"));
+    }
+
+    #[test]
+    fn full_commit_result_can_be_constructed_from_components() {
+        // A construction-only check — verifies the public field shape so
+        // downstream code can build mock results in tests.
+        fn _accept(r: FullCommitResult) -> (MlsMessageOut, PreSharedKeyId, MlsMessageOut) {
+            (r.pq_commit, r.apq_psk_id, r.t_commit)
+        }
     }
 
     #[test]
@@ -313,29 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn full_commit_result_can_be_constructed_from_components() {
-        // A construction-only check — verifies the public field shape so
-        // downstream code can build mock results in tests.
-        // This requires real Welcome / MlsMessageOut, which we don't have
-        // here without a running group, so we just assert the type exists
-        // with the expected layout via a `fn` that uses the type at build
-        // time.
-        fn _accept(r: FullCommitResult) -> (MlsMessageOut, PreSharedKeyId, MlsMessageOut) {
-            (r.pq_commit, r.apq_psk_id, r.t_commit)
-        }
-    }
-
-    #[test]
-    fn _provider_and_signer_generics_are_unconstrained_in_skeleton() {
-        // Compile-time check: the skeleton accepts any `P` / `S`. A real
-        // implementation will tighten these to `OpenMlsProvider` / `Signer`,
-        // but the skeleton leaves them open so callers can stub them in
-        // tests.
-        fn _check<P, S>(_p: &P, _s: &S) {}
-        _check(&DummyProvider, &DummySigner);
-    }
-
-    #[test]
     fn full_full_partial_commit_modes_are_distinct() {
         // Sanity test enforcing that we treat the three modes as a
         // partition. (Belt-and-braces given Pq* / Classical interactions.)
@@ -346,5 +537,14 @@ mod tests {
         ] {
             let _ = mode; // exhaustive match in select_mode is enough.
         }
+    }
+
+    #[test]
+    fn apq_psk_label_is_stable_domain_separator() {
+        // The label is part of the wire choreography — every client must
+        // agree on it byte-for-byte. Pin it here.
+        assert_eq!(APQ_PSK_LABEL, "kchat-apq-psk");
+        assert_eq!(APQ_PSK_LENGTH, 32);
+        assert_eq!(APQ_PSK_ID_LENGTH, 16);
     }
 }
