@@ -443,8 +443,9 @@ async fn msg_recv(
 /// We don't use a TLS-codec'd struct here because we want a small,
 /// self-contained binding that's easy to test from
 /// `actix_web::test::TestRequest`. Instead we hand-frame: first a
-/// `TlsVecU32<TlsByteVecU32>` of recipient client IDs, then the
-/// already-defined `PublishApqMessageRequest`.
+/// `TlsVecU32<TlsByteVecU8>` of recipient client IDs (one-byte length
+/// prefix per recipient ID, matching the wire format the tests
+/// produce), then the already-defined `PublishApqMessageRequest`.
 fn parse_publish_with_recipients(
     bytes: &[u8],
 ) -> Result<(Vec<Vec<u8>>, PublishApqMessageRequest), tls_codec::Error> {
@@ -545,16 +546,54 @@ async fn apq_publish_pair(mut body: Payload, data: web::Data<DsData>) -> impl Re
     actix_web::HttpResponse::Ok().finish()
 }
 
+/// `GET /apq/recv/{id}` — drain the per-client APQ queue.
+///
+/// Mirrors the auth model of [`msg_recv`]: the request body must be a
+/// TLS-codec'd [`RecvMessageRequest`] carrying the registered client's
+/// `auth_token`. The endpoint returns:
+///
+/// * `400 Bad Request` — the path is not valid base64 or the body is
+///   not a well-formed `RecvMessageRequest`.
+/// * `404 Not Found` — no client is registered under that ID.
+/// * `401 Unauthorized` — the supplied token does not match the
+///   client's stored token. Crucially, the queue is **not** drained
+///   on a token mismatch.
+/// * `200 OK` — body is a TLS-codec'd `RecvApqMessagesResponse`; the
+///   client's queue is removed.
 #[get("/apq/recv/{id}")]
-async fn apq_recv(path: web::Path<String>, data: web::Data<DsData>) -> impl Responder {
+async fn apq_recv(
+    path: web::Path<String>,
+    mut body: Payload,
+    data: web::Data<DsData>,
+) -> impl Responder {
+    let mut bytes = web::BytesMut::new();
+    while let Some(item) = body.next().await {
+        bytes.extend_from_slice(&unwrap_item!(item));
+    }
+
     let id = match base64::engine::general_purpose::URL_SAFE.decode(path.into_inner()) {
         Ok(v) => v,
         Err(_) => return actix_web::HttpResponse::BadRequest().finish(),
     };
 
+    let req = match RecvMessageRequest::tls_deserialize(&mut &bytes[..]) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("invalid /apq/recv payload for {id:?}: {e:?}");
+            return actix_web::HttpResponse::BadRequest().finish();
+        }
+    };
+
     let clients = unwrap_data!(data.clients.lock());
-    if !clients.contains_key(&id) {
-        return actix_web::HttpResponse::NotFound().finish();
+    let client = match clients.get(&id) {
+        Some(c) => c,
+        None => return actix_web::HttpResponse::NotFound().finish(),
+    };
+    if req.auth_token != client.auth_token {
+        // Mismatched / forged token. Bail out **before** touching
+        // `apq_queues`, otherwise a wrong-token caller could still
+        // cause a queue drain.
+        return actix_web::HttpResponse::Unauthorized().finish();
     }
     drop(clients);
 

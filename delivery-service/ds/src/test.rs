@@ -504,12 +504,16 @@ async fn apq_publish_and_recv_single_message_round_trips() {
         .to_request();
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::OK);
+    let register_resp_bytes = response.into_body().try_into_bytes().unwrap();
+    let register_resp = RegisterClientSuccessResponse::tls_deserialize_exact(&register_resp_bytes)
+        .expect("decode RegisterClientSuccessResponse");
+    let auth_token = register_resp.auth_token;
 
     // Publish a single APQ message addressed to the registered client.
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
     let publish = PublishApqMessageRequest {
         message: ApqMessage::new_t(b"hello-apq".to_vec()),
-        auth_token: ds_lib::messages::AuthToken::default(),
+        auth_token: auth_token.clone(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
@@ -524,7 +528,15 @@ async fn apq_publish_and_recv_single_message_round_trips() {
     // Receive should return a single Message envelope, then drain.
     let path =
         "/apq/recv/".to_owned() + &base64::engine::general_purpose::URL_SAFE.encode(&identity);
-    let req = test::TestRequest::with_uri(&path).to_request();
+    let recv_body = RecvMessageRequest {
+        auth_token: auth_token.clone(),
+    }
+    .tls_serialize_detached()
+    .unwrap();
+    let req = test::TestRequest::with_uri(&path)
+        .method(actix_web::http::Method::GET)
+        .set_payload(Bytes::copy_from_slice(&recv_body))
+        .to_request();
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().try_into_bytes().unwrap();
@@ -537,11 +549,66 @@ async fn apq_publish_and_recv_single_message_round_trips() {
     }
 
     // Second receive must return zero envelopes (queue drained).
-    let req = test::TestRequest::with_uri(&path).to_request();
+    let req = test::TestRequest::with_uri(&path)
+        .method(actix_web::http::Method::GET)
+        .set_payload(Bytes::copy_from_slice(&recv_body))
+        .to_request();
     let response = test::call_service(&app, req).await;
     let bytes = response.into_body().try_into_bytes().unwrap();
     let recv2 = RecvApqMessagesResponse::tls_deserialize_exact(&bytes).expect("decode 2");
     assert!(recv2.envelopes.is_empty());
+
+    // A request with the wrong token must be rejected with 401, and
+    // must NOT drain anything from the queue. Re-publish first so the
+    // queue is non-empty when the unauthorized request arrives.
+    let publish = PublishApqMessageRequest {
+        message: ApqMessage::new_t(b"sensitive".to_vec()),
+        auth_token: auth_token.clone(),
+    };
+    let mut payload = recipients.tls_serialize_detached().unwrap();
+    payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
+    let req = test::TestRequest::post()
+        .uri("/apq/publish")
+        .set_payload(Bytes::copy_from_slice(&payload))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Use a fresh `AuthToken::default()` (different random bytes) for
+    // the unauthorized recv attempt.
+    let bad_recv_body = RecvMessageRequest {
+        auth_token: ds_lib::messages::AuthToken::default(),
+    }
+    .tls_serialize_detached()
+    .unwrap();
+    let req = test::TestRequest::with_uri(&path)
+        .method(actix_web::http::Method::GET)
+        .set_payload(Bytes::copy_from_slice(&bad_recv_body))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Queue must still hold the envelope — unauthorized callers
+    // cannot drain another client's queue.
+    {
+        let queues = data.apq_queues.lock().unwrap();
+        assert_eq!(
+            queues.get(&identity).map(|v| v.len()),
+            Some(1),
+            "unauthorized recv must not drain the APQ queue"
+        );
+    }
+
+    // The right token still drains it.
+    let req = test::TestRequest::with_uri(&path)
+        .method(actix_web::http::Method::GET)
+        .set_payload(Bytes::copy_from_slice(&recv_body))
+        .to_request();
+    let response = test::call_service(&app, req).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().try_into_bytes().unwrap();
+    let recv3 = RecvApqMessagesResponse::tls_deserialize_exact(&bytes).expect("decode 3");
+    assert_eq!(recv3.envelopes.len(), 1);
 }
 
 #[actix_rt::test]
@@ -589,12 +656,16 @@ async fn apq_publish_pair_round_trips_full_commit() {
         .to_request();
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::OK);
+    let register_resp_bytes = response.into_body().try_into_bytes().unwrap();
+    let register_resp = RegisterClientSuccessResponse::tls_deserialize_exact(&register_resp_bytes)
+        .expect("decode RegisterClientSuccessResponse");
+    let auth_token = register_resp.auth_token;
 
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
     let pair = ApqCommitPair::new(7, b"pq-half".to_vec(), b"t-half".to_vec());
     let publish = PublishApqCommitPairRequest {
         pair: pair.clone(),
-        auth_token: ds_lib::messages::AuthToken::default(),
+        auth_token: auth_token.clone(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
@@ -608,7 +679,15 @@ async fn apq_publish_pair_round_trips_full_commit() {
 
     let path =
         "/apq/recv/".to_owned() + &base64::engine::general_purpose::URL_SAFE.encode(&identity);
-    let req = test::TestRequest::with_uri(&path).to_request();
+    let recv_body = RecvMessageRequest {
+        auth_token: auth_token.clone(),
+    }
+    .tls_serialize_detached()
+    .unwrap();
+    let req = test::TestRequest::with_uri(&path)
+        .method(actix_web::http::Method::GET)
+        .set_payload(Bytes::copy_from_slice(&recv_body))
+        .to_request();
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().try_into_bytes().unwrap();
@@ -697,11 +776,15 @@ async fn reset_clears_apq_queues() {
         .to_request();
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::OK);
+    let register_resp_bytes = response.into_body().try_into_bytes().unwrap();
+    let register_resp = RegisterClientSuccessResponse::tls_deserialize_exact(&register_resp_bytes)
+        .expect("decode RegisterClientSuccessResponse");
+    let auth_token = register_resp.auth_token;
 
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
     let publish = PublishApqMessageRequest {
         message: ApqMessage::new_t(b"about-to-be-reset".to_vec()),
-        auth_token: ds_lib::messages::AuthToken::default(),
+        auth_token: auth_token.clone(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
