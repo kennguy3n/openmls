@@ -380,15 +380,28 @@ impl KChatMlsConversation {
             .map_err(|e| ApqBootstrapError::PskStoreFailed(format!("{e}")))?;
 
         // --- 3. Build ApqInfo -----------------------------------------------
+        //
+        // `ApqInfo::{t_epoch, pq_epoch}` track the FULL-commit synchronization
+        // counter for the APQ relationship — they are *not* the live MLS
+        // group epochs. At bootstrap, the PQ group has just performed its
+        // first commit (epoch 1) and is the synchronization anchor for the
+        // new APQ relationship; both fields therefore start at the PQ
+        // group's epoch. Subsequent FULL commits advance both fields
+        // together, keeping the recorded drift at zero.
+        //
+        // This decouples the recorded drift check from the absolute T-group
+        // epoch, which can be arbitrarily large for long-running classical
+        // groups being upgraded in place (PHASES.md Phase 4).
         let t_group = self
             .t_group
             .as_ref()
             .expect("t_group present (precondition)");
+        let sync_epoch = pq_group.epoch().as_u64();
         let apq_info = ApqInfo::new(
             t_group.group_id().clone(),
             pq_group.group_id().clone(),
-            t_group.epoch().as_u64(),
-            pq_group.epoch().as_u64(),
+            sync_epoch,
+            sync_epoch,
             t_group.ciphersuite(),
             pq_group.ciphersuite(),
             apq_mode,

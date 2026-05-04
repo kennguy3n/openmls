@@ -19,13 +19,11 @@
 //!
 //! See [`PHASES.md`](../../../PHASES.md) Phase 5 (Adoption / Recovery).
 
-use openmls_traits::random::OpenMlsRand;
 use openmls_traits::signatures::Signer;
 
 use crate::framing::{MlsMessageIn, ProcessedMessageContent, ProtocolMessage};
 use crate::group::apq_commit::{
-    prepare_full_commit, ApqCommitError, FullCommitResult, APQ_PSK_ID_LENGTH, APQ_PSK_LABEL,
-    APQ_PSK_LENGTH,
+    prepare_full_commit, ApqCommitError, FullCommitResult, APQ_PSK_LABEL, APQ_PSK_LENGTH,
 };
 use crate::group::kchat_conversation::KChatMlsConversation;
 use crate::group::pq_policy::CommitTrigger;
@@ -192,15 +190,21 @@ pub fn detect_desync(conversation: &KChatMlsConversation) -> DesyncReport {
 /// 2. Merge the staged commit so the new PQ epoch is live.
 /// 3. Derive a fresh `apq_psk` via [`crate::group::mls_group::MlsGroup::export_secret`]
 ///    using [`APQ_PSK_LABEL`] and the conversation ID.
-/// 4. Store it under a new [`PreSharedKeyId`] so the upcoming T commit
-///    (which references the same PSK ID) can verify.
+/// 4. Persist it under `expected_psk_id` so the matching T commit (whose
+///    `PreSharedKey` proposal references the **same** ID — chosen by the
+///    sender during [`prepare_full_commit`]) can be loaded by the
+///    standard MLS PSK lookup when the caller follows up with
+///    [`resync_from_t`].
 ///
-/// Returns the new [`PreSharedKeyId`] alongside the [`ResyncResult`] so
-/// the orchestration layer can ship it to the caller of the missed
-/// commit pair.
+/// `expected_psk_id` is supplied by the caller — typically extracted
+/// from the missed T commit's `PreSharedKey` proposal before calling
+/// this function. Generating a fresh random ID here would not match
+/// what the wire commit references and would silently break the
+/// recovery path.
 pub fn resync_from_pq<P>(
     conversation: &mut KChatMlsConversation,
     missed_pq_commit: MlsMessageIn,
+    expected_psk_id: PreSharedKeyId,
     provider: &P,
 ) -> Result<(ResyncResult, PreSharedKeyId), ApqResyncError>
 where
@@ -217,10 +221,6 @@ where
     }
 
     let conversation_id = conversation.conversation_id().to_vec();
-    let pq_ciphersuite = conversation
-        .pq_group()
-        .expect("pq_group present (precondition)")
-        .ciphersuite();
 
     // 1. Process the missed PQ commit ----------------------------------------
     let protocol_msg: ProtocolMessage = ProtocolMessage::try_from(missed_pq_commit)
@@ -249,7 +249,7 @@ where
             .map_err(|e| ApqResyncError::MergeFailed(format!("{e}")))?;
     }
 
-    // 3. Derive new apq_psk ---------------------------------------------------
+    // 3. Derive new apq_psk and persist under the wire-referenced ID --------
     let apq_psk = conversation
         .pq_group()
         .expect("pq_group present (precondition)")
@@ -261,16 +261,7 @@ where
         )
         .map_err(|e| ApqResyncError::ExportSecretFailed(format!("{e}")))?;
 
-    let psk_id_bytes = provider
-        .rand()
-        .random_vec(APQ_PSK_ID_LENGTH)
-        .map_err(|e| ApqResyncError::RandomGenerationFailed(format!("psk_id: {e}")))?;
-    let psk_nonce = provider
-        .rand()
-        .random_vec(pq_ciphersuite.hash_length())
-        .map_err(|e| ApqResyncError::RandomGenerationFailed(format!("psk_nonce: {e}")))?;
-    let apq_psk_id = PreSharedKeyId::external(psk_id_bytes, psk_nonce);
-    apq_psk_id
+    expected_psk_id
         .store(provider, &apq_psk)
         .map_err(|e| ApqResyncError::PskStoreFailed(format!("{e}")))?;
 
@@ -286,7 +277,7 @@ where
             t_epoch: report.t_epoch.unwrap_or(0),
             pq_epoch: report.pq_epoch.unwrap_or(0),
         },
-        apq_psk_id,
+        expected_psk_id,
     ))
 }
 

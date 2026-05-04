@@ -227,11 +227,28 @@ where
         .stage_commit(provider)
         .map_err(|e| ReInitError::CommitFailed(format!("stage_commit: {e}")))?;
 
-    // We have to take ownership here so we can pull `commit` and
-    // `welcome` out separately. The bundle's `into_commit()` consumes
-    // the bundle and returns just the commit; we keep the welcome
-    // (which will be `None` for a pure ReInit) in `welcome`.
     let commit_msg = bundle.into_commit();
+
+    // Merge the staged commit so the old group's epoch advances to its
+    // post-ReInit value before any caller touches `complete_reinit`. The
+    // resumption PSK exporter must run against this advanced epoch (RFC
+    // 9420 §11.2) so peers who merge the same commit derive matching key
+    // material.
+    old_group
+        .merge_pending_commit(provider)
+        .map_err(|e| ReInitError::MergeFailed(format!("{e}")))?;
+
+    // Upstream OpenMLS only auto-transitions to `Inactive` on self-removal
+    // (`processing.rs::merge_staged_commit` checks `staged_commit.self_removed()`).
+    // ReInit is not self-removal, so we must explicitly seal the old group
+    // ourselves to enforce the read-only invariant the docstring promises.
+    old_group
+        .set_inactive(provider.storage())
+        .map_err(|e| ReInitError::MergeFailed(format!("set_inactive: {e}")))?;
+
+    if old_group.is_active() {
+        return Err(ReInitError::OldGroupStillActive);
+    }
 
     Ok(ReInitCommit {
         commit: commit_msg,
