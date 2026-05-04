@@ -155,11 +155,18 @@ separate axes:
 **Confidentiality (KEM):**
 - **Current draft (HNDL bridge):** `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`
   at draft codepoint `0x004D` (X-Wing hybrid: ML-KEM-768 + X25519).
-- **Planned, tracking the IETF MLS PQ ciphersuite draft (codepoints TBD until
-  IANA assignment):**
-  - ML-KEM hybrid suites (ML-KEM + X25519 or P-256) — primary
-    `PQ_CONFIDENTIALITY` target.
-  - Pure ML-KEM suites — once IETF/NIST guidance settles on standalone PQ.
+- **Tracking the IETF MLS PQ ciphersuite draft (private-use draft
+  codepoints in the `0xFE00`–`0xFEFF` range until IANA assignment):**
+  - `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519` at draft
+    codepoint `0xFE01` — ML-KEM-768 + X25519 hybrid KEM, AES-256-GCM
+    AEAD, Ed25519 signatures. Primary `PQ_CONFIDENTIALITY` target.
+  - `MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519` at draft
+    codepoint `0xFE02` — same KEM with ChaCha20-Poly1305 AEAD.
+  - `MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448` at draft codepoint
+    `0xFE03` — pure ML-KEM-1024 (FIPS 203) with Ed448 signatures.
+  All three are flagged via `Ciphersuite::is_draft_codepoint()` and
+  rejected with `CryptoError::UnsupportedCiphersuite` by both providers
+  until libcrux gains ML-KEM bindings.
 
 **Authenticity (signatures):**
 - ML-DSA suites (FIPS 204) — required for `PQ_AUTHENTICITY`. Distinct from KEM
@@ -243,7 +250,9 @@ The orchestration layer is implemented as the following modules in the
 | `KeyPackageService`                        | `openmls/src/key_packages/key_package_service.rs`        | Phase 1 server-side per-ciphersuite KP store with one-time consumption + last-resort. |
 | `ConversationMetadataService`              | `openmls/src/group/conversation_metadata.rs`             | Phase 4 conversation security state tracking, gated by no-downgrade validators.       |
 | `KeyPackageFetchRateLimiter`               | `openmls/src/key_packages/rate_limiter.rs`               | Phase 1 sliding-window rate limiter for PQ KeyPackage fetches.                        |
-| `PqTelemetryEvent` / `PqTelemetryEmitter`  | `openmls/src/group/pq_telemetry.rs`                      | Cross-phase telemetry: 8-variant event enum + `NoOp` and `InMemory` emitters.         |
+| `PqTelemetryEvent` / `PqTelemetryEmitter`  | `openmls/src/group/pq_telemetry.rs`                      | Cross-phase telemetry: 8-variant event enum + `NoOp` and `InMemory` emitters. Wired into `KChatMlsConversation` and the orchestration entry points via `*_with_emitter` wrapper functions. |
+| `DeliveryService` / `ApqDeliveryEnvelope`  | `openmls/src/messages/delivery_service.rs`               | In-memory reference Delivery Service. Per-group FIFO queues, FULL-pair PQ‑before‑T ordering enforcement, and `enqueue` / `deliver_next` / `pending_count` / `pending_full_pairs`. |
+| `MigrationStateMachine` / `MigrationEvent` | `openmls/src/group/migration_state.rs`                   | Per-conversation upgrade lifecycle state machine: 8 states from `NotStarted` through `Operational` / `Failed`, with `advance` / `can_advance` / `is_terminal` and `Failed` reachable from any non-terminal state. |
 
 FULL and PARTIAL commits are wired through `MlsGroup::commit_builder`:
 `prepare_full_commit` runs the PQ commit first, derives `apq_psk` via

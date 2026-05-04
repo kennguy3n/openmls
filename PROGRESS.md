@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~55%**
+**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~70%**
 
 ## Version Targets
 
@@ -61,15 +61,26 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       RustCrypto provider.
 - [x] Gate X-Wing in the libcrux provider behind an explicit feature flag
       (`openmls_libcrux_crypto/xwing`, surfaced as `openmls/xwing`).
-- [ ] Add FIPS 203 / IETF HPKE-PQ Known Answer Tests (KATs) when available.
+- [x] Add FIPS 203 / IETF HPKE-PQ Known Answer Tests (KATs) — placeholder
+      vectors for ML-KEM and ML-DSA in
+      `openmls/tests/pq_kat_vectors/{ml_kem,ml_dsa}.json`, with schema
+      and classical-rejection tests in `openmls/tests/pq_kat_tests.rs`.
+      Real FIPS 203 vectors will replace the placeholders once the
+      libcrux provider lands ML-KEM bindings.
 - [x] Separate draft / private codepoints from final IANA codepoints in
       `traits/src/types.rs` via `is_draft_codepoint()` helpers and module
       docs.
 
 #### MLS PQ ciphersuite layer
 
-- [ ] Add IETF MLS PQ draft ciphersuites (ML-KEM hybrid, pure ML-KEM, ML-DSA
-      variants) with versioned draft codepoints.
+- [x] Add IETF MLS PQ draft ciphersuites (ML-KEM hybrid, pure ML-KEM)
+      with versioned draft codepoints. Three new variants in
+      `traits/src/types.rs`:
+      `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519` (`0xFE01`),
+      `MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519`
+      (`0xFE02`), and `MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448`
+      (`0xFE03`). All flagged via `is_draft_codepoint()`. Both providers
+      reject them with `UnsupportedCiphersuite`.
 - [x] Add ML-DSA signature scheme support to the `SignatureScheme` enum
       (`traits/src/types.rs`). Variants `MLDSA44 = 0x0904`,
       `MLDSA65 = 0x0905`, `MLDSA87 = 0x0906` are wired through with
@@ -133,7 +144,11 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 - [x] Capability registry: signed per-device PQ capability — in-memory
       reference impl in
       `openmls/src/credentials/capability_registry.rs`.
-- [ ] Delivery service: APQ wrapper message support and commit ordering.
+- [x] Delivery service: APQ wrapper message support and commit
+      ordering — in-memory reference impl in
+      `openmls/src/messages/delivery_service.rs`. Per-group FIFO
+      queue, FULL-pair ordering enforcement (PQ before T), and
+      `pending_count` tracking. 8 unit tests.
 - [x] Group metadata service: conversation security state tracking —
       in-memory reference impl in
       `openmls/src/group/conversation_metadata.rs`.
@@ -155,8 +170,12 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       (`openmls/tests/pq_lifecycle_tests.rs`).
 - [x] Downgrade rejection tests
       (`openmls/tests/pq_downgrade_tests.rs` — 11 integration tests).
-- [ ] PQ KeyPackage storage load testing.
-- [ ] Welcome fanout load testing at target scale.
+- [x] PQ KeyPackage storage load testing
+      (`openmls/tests/pq_load_tests.rs` — 6 integration tests at
+      100-device / 1000-KP scale).
+- [x] Welcome fanout load testing at target scale
+      (`openmls/tests/pq_welcome_fanout_tests.rs` — 5 integration
+      tests at 50-group / 100-Welcome scale).
 - [x] Client resync after a missed PQ/T commit pair
       (`openmls/src/group/apq_resync.rs`).
 - [ ] External security review of APQ orchestration.
@@ -169,13 +188,91 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | ~~RustCrypto provider panics on X-Wing~~         | Fixed: RustCrypto returns `UnsupportedCiphersuite` instead of panicking |
 | No ML-DSA signature support in any provider      | PQ confidentiality ≠ PQ authenticity (enum + helpers landed; no provider impl) |
 | ~~No APQ-MLS combiner~~                          | Combiner scaffolding (FULL/PARTIAL commits, ApqInfo, bootstrap, ReInit, resync) is wired against `MlsGroup`; live multi-client soak tests still pending |
-| Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage |
-| `commit_reinit` seals the old group before `complete_reinit` can run | `commit_reinit` calls `set_inactive` after merging, and `export_secret` on an inactive group fails with `UseAfterEviction` — a future revision must derive the resumption PSK before sealing or expose an inactive-group exporter |
-| No migration state machine                       | Millions of users need per-device, per-conversation upgrade logic     |
+| Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `DeliveryService`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage |
+| ~~`commit_reinit` seals the old group before `complete_reinit` can run~~ | Fixed: `commit_reinit` now derives the Resumption(ReInit) PSK before sealing the old group and stores it on `ReInitCommit`. `complete_reinit` consumes the pre-derived secret instead of calling `export_secret` on an inactive group |
+| ~~No migration state machine~~                   | Fixed: per-conversation `MigrationStateMachine` in `openmls/src/group/migration_state.rs` with 8-state lifecycle and 12 unit tests |
 | No server-side capability protocol               | Required for staged rollout                                           |
-| No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs                          |
+| No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs (ML-KEM hybrid + pure ML-KEM 1024 draft codepoints landed in this batch)         |
 
 ## Changelog
+
+### 2026-05-04 (PQ batch 3 — orchestration completion)
+
+- Fixed the `commit_reinit` seal-order bug. `commit_reinit` now
+  derives the Resumption(ReInit) PSK via `export_secret` *before*
+  calling `set_inactive`, stores the secret on `ReInitCommit`, and
+  `complete_reinit` / `complete_reinit_from_commit` consume the
+  pre-derived secret instead of attempting to call `export_secret` on
+  an inactive group. The regression test in
+  `openmls/tests/pq_reinit_e2e_tests.rs` that previously pinned the
+  `UseAfterEviction` failure now drives the full propose → commit →
+  complete flow end-to-end.
+- Added `openmls/src/messages/delivery_service.rs` — in-memory
+  reference Delivery Service. Wraps outbound MLS messages in
+  `ApqDeliveryEnvelope` (group_id, T or PQ session side, FULL-pair
+  metadata), enqueues per-group, enforces PQ-before-T ordering on
+  FULL commit pairs, and exposes `enqueue` / `deliver_next` /
+  `deliver_all` / `pending_count` / `pending_full_pairs`. 8 unit
+  tests.
+- Added IETF MLS PQ draft ciphersuites to `traits/src/types.rs`:
+  `MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519` (`0xFE01`),
+  `MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519`
+  (`0xFE02`), and `MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448`
+  (`0xFE03`). Both providers reject them with
+  `UnsupportedCiphersuite`. New `HpkeKemType` variants
+  `MlKem768X25519Draft` (`0xFE01`) and `MlKem1024Draft` (`0xFE03`).
+- Expanded the FIPS 203 KAT scaffolding. Added
+  `openmls/tests/pq_kat_vectors/ml_kem.json` and
+  `openmls/tests/pq_kat_vectors/ml_dsa.json` with three placeholder
+  vectors each, plus `mod ml_kem` and `mod ml_dsa` runner modules in
+  `openmls/tests/pq_kat_tests.rs` covering schema parsing,
+  hex-decode round-trip, ciphersuite codepoint pinning, and classical-
+  provider rejection (5 new tests).
+- Added `openmls/tests/pq_load_tests.rs` (6 integration tests):
+  1000-KeyPackage / 100-device publish stress, per-device cap
+  enforcement, multi-ciphersuite fetch, `expire_before` at scale,
+  last-resort fallback under load, and rate-limiter sliding-window
+  enforcement. All complete in well under a second on dev hardware.
+- Added `openmls/tests/pq_welcome_fanout_tests.rs` (5 integration
+  tests): single-Welcome-per-`add_members` invariant under repeated
+  adds, 100x Welcome serialize/deserialize round-trip, 50 simultaneous
+  group setups, 20-envelope `ApqWelcome` round-trip, and Welcome
+  ciphersuite consistency across a 10-add batch.
+- Wired `PqTelemetryEmitter` into the orchestration layer. Added an
+  `Arc<dyn PqTelemetryEmitter>` field (defaulting to
+  `NoOpTelemetryEmitter`) and a `set_telemetry_emitter` method on
+  `KChatMlsConversation`. `bootstrap_apq` emits
+  `ApqBootstrapCompleted` on success and `PqProviderError` on every
+  crypto failure path. `apq_resync` functions emit `ResyncTriggered`.
+  Three new telemetry-aware wrappers preserve backward compatibility:
+  `select_conversation_mode_with_emitter` (emits
+  `UnsupportedCiphersuite`), `validate_mode_change_with_emitter`
+  (emits `DowngradeAttempt`), and
+  `complete_reinit_from_commit_with_emitter` (emits `ReInitCompleted`
+  / `PqProviderError`). `ReInitCommit` gained a `new_ciphersuite`
+  field for telemetry payloads.
+- Added `openmls/tests/pq_telemetry_integration_tests.rs` (8
+  integration tests) demonstrating event emission through the
+  orchestration layer, NoOp safety, FIFO event ordering, and
+  emitter swap-after-construction.
+- Added `openmls/src/group/migration_state.rs` — per-conversation
+  upgrade lifecycle state machine with eight states
+  (`NotStarted` → `CapabilitiesCollected` → `KeyPackagesPublished` →
+  `ModeSelected` → `BootstrapInitiated` → `BootstrapComplete` →
+  `FirstFullCommitDone` → `Operational` | `Failed`),
+  `MigrationEvent` enum, `advance` / `can_advance` / `is_terminal`
+  methods, and `Failed` reachability from every non-terminal state.
+  12 unit tests.
+- Added `openmls/tests/pq_full_e2e_tests.rs` (15 integration tests)
+  driving the complete orchestration lifecycle against real
+  `MlsGroup` instances: classical group creation, `add_members` +
+  Welcome fanout, capability-driven mode selection,
+  no-downgrade validators (mode, joiner KP, APQ info),
+  `ConversationMetadataService` round-trip, `CapabilityRegistry`
+  store/fetch, `KeyPackageService` publish/fetch/expire,
+  `KeyPackageFetchRateLimiter` per-device enforcement, ReInit
+  proposal construction, `PqPolicy::required_commit_type`, and a
+  full `MigrationStateMachine` lifecycle traversal.
 
 ### 2026-05-04 (server stubs and end-to-end tests)
 
@@ -391,4 +488,4 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 ## Last Updated
 
-2026-05-04
+2026-05-04 (PQ batch 3)

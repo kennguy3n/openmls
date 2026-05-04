@@ -35,12 +35,14 @@ use openmls_traits::random::OpenMlsRand;
 
 pub mod apq_welcome;
 pub(crate) mod codec;
+pub mod delivery_service;
 pub mod external_proposals;
 pub mod group_info;
 pub mod proposals;
 pub mod proposals_in;
 
 pub use apq_welcome::{ApqWelcome, ApqWelcomeError};
+pub use delivery_service::{ApqDeliveryEnvelope, DeliveryError, DeliveryService, SessionSide};
 
 #[cfg(test)]
 mod tests;

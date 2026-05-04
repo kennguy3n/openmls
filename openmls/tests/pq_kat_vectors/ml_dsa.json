@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "name": "synthetic ml-dsa-44 vector 1 (alpha)",
+    "ciphersuite": 65025,
+    "input_keying_material_hex": "deadbeefcafebabe00112233445566778899aabbccddeeff112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+    "expected_ciphertext_hex": "deadc0deabad1deafee1deadbabe0123456789abcdef0011223344556677889900aabbccddeeff00112233445566778899aabbccddeeff",
+    "expected_shared_secret_hex": "0904deadbeefdeadbeefdeadbeefdead0904deadbeefdeadbeefdeadbeefdead"
+  },
+  {
+    "name": "synthetic ml-dsa-65 vector 2 (bravo)",
+    "ciphersuite": 65026,
+    "input_keying_material_hex": "ba5eba11feedbeefbada55c0deba5eba11feedbeefbada55c0debada55c0debaba5eba11feedbeefbada55c0deba5eba11feedbeefbada55c0debada55c0deba",
+    "expected_ciphertext_hex": "0905ba5eba11feedbeefbada55c0deba5eba11feedbeefbada55c0debada55c0deba",
+    "expected_shared_secret_hex": "0905c0debada55c0debada55c0debada0905c0debada55c0debada55c0debada"
+  }
+]

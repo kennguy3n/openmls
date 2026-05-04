@@ -421,6 +421,13 @@ fn hpke_kem(kem: HpkeKemType) -> Result<hpke_rs_crypto::types::KemAlgorithm, Cry
         HpkeKemType::XWingKemDraft6 => Ok(hpke_rs_crypto::types::KemAlgorithm::XWingDraft06),
         #[cfg(not(feature = "xwing"))]
         HpkeKemType::XWingKemDraft6 => Err(CryptoError::UnsupportedCiphersuite),
+        // ML-KEM draft suites are not yet wired through to the
+        // libcrux HPKE backend; reject explicitly so callers see the
+        // same `UnsupportedCiphersuite` signal they would for any
+        // other suite this provider does not speak.
+        HpkeKemType::MlKem768X25519Draft | HpkeKemType::MlKem1024Draft => {
+            Err(CryptoError::UnsupportedCiphersuite)
+        }
     }
 }
 

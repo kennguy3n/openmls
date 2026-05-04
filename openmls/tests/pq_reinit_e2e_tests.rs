@@ -17,7 +17,8 @@
 
 use openmls::credentials::{BasicCredential, CredentialWithKey};
 use openmls::group::reinit_upgrade::{
-    commit_reinit, complete_reinit, propose_reinit, ReInitError, ReInitPlan,
+    commit_reinit, complete_reinit, complete_reinit_from_commit, propose_reinit, ReInitError,
+    ReInitPlan,
 };
 use openmls::group::{GroupId, MlsGroup, MlsGroupCreateConfig};
 use openmls::messages::proposals::Proposal;
@@ -144,26 +145,83 @@ fn complete_reinit_on_active_group_returns_resumption_psk_with_reinit_usage() {
 }
 
 #[test]
-fn commit_reinit_then_complete_reinit_documents_seal_order() {
-    // `commit_reinit` calls `set_inactive` after merging the ReInit
-    // commit, and an inactive group's `export_secret` returns
-    // `UseAfterEviction`. This test pins down the current contract so
-    // a future fix that lets the orchestration call
-    // `complete_reinit` after `commit_reinit` does not regress
-    // silently.
+fn commit_reinit_then_complete_reinit_from_commit_succeeds_after_seal() {
+    // `commit_reinit` derives the resumption PSK *before* sealing the
+    // old group (so the exporter is still callable), and stashes it
+    // in [`ReInitCommit::resumption_psk_secret`].
+    // [`complete_reinit_from_commit`] then finishes the work using
+    // that pre-derived secret, without re-touching the now-inactive
+    // group. This test pins the happy path that the orchestration
+    // layer relies on: propose → commit → complete after seal.
+    let provider = OpenMlsRustCrypto::default();
+    let (mut alice_group, alice_signer) =
+        classical_group_with_cs(&provider, "alice", classical_aes());
+    let old_group_id = alice_group.group_id().clone();
+
+    let plan = ReInitPlan::new(GroupId::from_slice(&[0xC0; 16]), classical_chacha());
+    let commit =
+        commit_reinit(&mut alice_group, &plan, &provider, &alice_signer).expect("commit_reinit ok");
+
+    // The commit must carry the pre-derived PSK secret along with the
+    // identifying metadata for the old group at its final epoch.
+    assert!(
+        commit.resumption_psk_secret.is_some(),
+        "commit_reinit must stash resumption_psk_secret before set_inactive"
+    );
+    assert_eq!(commit.old_group_id, old_group_id);
+    assert_eq!(commit.old_ciphersuite, classical_aes());
+
+    // The old group is sealed; the legacy `complete_reinit` path that
+    // calls `export_secret` on the now-inactive group is *not* the
+    // one orchestration uses anymore.
+    assert!(!alice_group.is_active());
+
+    // The new path: complete_reinit_from_commit consumes the
+    // pre-derived secret and persists it under a fresh PSK ID. This
+    // must succeed even though the group is now inactive.
+    let resumption =
+        complete_reinit_from_commit(&commit, &provider).expect("complete_reinit_from_commit ok");
+    assert_eq!(resumption.old_group_id, old_group_id);
+    assert_eq!(resumption.old_group_epoch, commit.old_group_epoch);
+    assert_eq!(resumption.old_ciphersuite, classical_aes());
+
+    // The resumption PSK ID must reference the old group's final
+    // epoch with `ResumptionPskUsage::Reinit`.
+    let psk = resumption.resumption_psk_id.psk();
+    let resumption_payload = match psk {
+        openmls::schedule::psk::Psk::Resumption(r) => r,
+        other => panic!("expected resumption PSK, got {other:?}"),
+    };
+    assert_eq!(resumption_payload.usage(), ResumptionPskUsage::Reinit);
+    assert_eq!(
+        resumption_payload.psk_group_id().as_slice(),
+        old_group_id.as_slice()
+    );
+}
+
+#[test]
+fn complete_reinit_from_commit_fails_when_secret_missing() {
+    // Pin the explicit error path: if orchestration code somehow
+    // strips the pre-derived `resumption_psk_secret` from a
+    // [`ReInitCommit`] (e.g. after deserialization through a
+    // legacy boundary), the call must fail with
+    // [`ReInitError::ExportSecretFailed`] rather than returning
+    // garbage PSK material.
     let provider = OpenMlsRustCrypto::default();
     let (mut alice_group, alice_signer) =
         classical_group_with_cs(&provider, "alice", classical_aes());
     let plan = ReInitPlan::new(GroupId::from_slice(&[0xC0; 16]), classical_chacha());
-    commit_reinit(&mut alice_group, &plan, &provider, &alice_signer).expect("commit ok");
+    let mut commit =
+        commit_reinit(&mut alice_group, &plan, &provider, &alice_signer).expect("commit_reinit ok");
+    // Drop the secret to force the missing-secret error path.
+    commit.resumption_psk_secret = None;
 
-    // After the seal, complete_reinit cannot derive the PSK because
-    // the group is inactive. The orchestration layer is expected to
-    // call complete_reinit *before* commit_reinit's seal moment in a
-    // future revision; for now this is the observable behaviour.
-    let err = complete_reinit(&alice_group, &provider)
-        .expect_err("export_secret on sealed group must fail");
-    assert!(matches!(err, ReInitError::ExportSecretFailed(_)));
+    let err = complete_reinit_from_commit(&commit, &provider)
+        .expect_err("missing secret must fail explicitly");
+    assert!(
+        matches!(err, ReInitError::ExportSecretFailed(_)),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]

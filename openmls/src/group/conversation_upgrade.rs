@@ -17,6 +17,7 @@ use openmls_traits::types::Ciphersuite;
 
 use crate::ciphersuite::SecurityMode;
 use crate::credentials::DeviceCapability;
+use crate::group::pq_telemetry::{PqTelemetryEmitter, PqTelemetryEvent};
 
 /// Errors that prevent a conversation from being created.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -90,6 +91,52 @@ pub fn select_conversation_mode(
     }
 
     Err(ConversationUpgradeError::NoCommonCiphersuite { mode: target_mode })
+}
+
+/// Telemetry-aware variant of [`select_conversation_mode`].
+///
+/// Behaves identically to [`select_conversation_mode`] but emits a
+/// [`PqTelemetryEvent::UnsupportedCiphersuite`] event for every peer
+/// whose advertised PQ ciphersuite list could not be honoured at the
+/// returned mode. This makes Phase 2 fail-closed selection observable
+/// without changing the success path.
+///
+/// `provider_id` identifies the local crypto provider in the emitted
+/// event (typically `"rustcrypto"` or `"libcrux"`).
+pub fn select_conversation_mode_with_emitter(
+    peer_capabilities: &[&DeviceCapability],
+    emitter: &dyn PqTelemetryEmitter,
+    provider_id: &str,
+) -> Result<(SecurityMode, Ciphersuite), ConversationUpgradeError> {
+    let result = select_conversation_mode(peer_capabilities);
+    if let Err(ConversationUpgradeError::NoCommonCiphersuite { mode }) = &result {
+        // Emit one UnsupportedCiphersuite event per *advertised* PQ
+        // ciphersuite that the chosen mode could not honour. This
+        // gives dashboards visibility into which suites peers expected.
+        for cap in peer_capabilities {
+            for cs in &cap.pq_ciphersuites {
+                if SecurityMode::from_ciphersuite(*cs) < *mode {
+                    emitter.emit(PqTelemetryEvent::UnsupportedCiphersuite {
+                        ciphersuite: *cs,
+                        provider_id: provider_id.to_string(),
+                    });
+                }
+            }
+        }
+        // Always emit at least one event so callers can pin the
+        // "selection failed" signal even when peers advertised no PQ
+        // suites at all.
+        if peer_capabilities
+            .iter()
+            .all(|c| c.pq_ciphersuites.is_empty())
+        {
+            emitter.emit(PqTelemetryEvent::UnsupportedCiphersuite {
+                ciphersuite: Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+                provider_id: provider_id.to_string(),
+            });
+        }
+    }
+    result
 }
 
 #[cfg(test)]

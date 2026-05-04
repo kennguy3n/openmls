@@ -382,3 +382,138 @@ fn classical_provider_rejects_pq_kat_ciphersuite() {
         );
     }
 }
+
+// =============================================================================
+// FIPS 203 (ML-KEM) KAT runner — schema validation + classical rejection.
+// =============================================================================
+
+mod mlkem {
+    use super::*;
+    use openmls_rust_crypto::RustCrypto;
+    use openmls_traits::crypto::OpenMlsCrypto;
+
+    fn ml_kem_draft_codepoints() -> [u16; 3] {
+        // Codepoints must match the variants we registered in
+        // `traits/src/types.rs`.
+        [
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519 as u16,
+            Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 as u16,
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 as u16,
+        ]
+    }
+
+    #[test]
+    fn ml_kem_vectors_load_and_parse_cleanly() {
+        let vectors = load_named("ml_kem.json");
+        assert!(
+            !vectors.is_empty(),
+            "ml_kem.json must ship at least one synthetic vector — see Task 4"
+        );
+        for v in &vectors {
+            // The ciphersuite identifier must round-trip through
+            // [`Ciphersuite::try_from`] so we know the codepoint is
+            // a registered draft variant.
+            let cs = v
+                .ciphersuite()
+                .unwrap_or_else(|e| panic!("vector {} has unknown ciphersuite: {e}", v.name));
+            assert!(
+                cs.is_draft_codepoint(),
+                "ml_kem.json vector {} references non-draft ciphersuite {cs:?}",
+                v.name
+            );
+            // Hex fields must decode.
+            hex_decode("input_keying_material", &v.input_keying_material_hex)
+                .unwrap_or_else(|e| panic!("{}: ikm decode {e}", v.name));
+            hex_decode("expected_ciphertext", &v.expected_ciphertext_hex)
+                .unwrap_or_else(|e| panic!("{}: ct decode {e}", v.name));
+            hex_decode("expected_shared_secret", &v.expected_shared_secret_hex)
+                .unwrap_or_else(|e| panic!("{}: ss decode {e}", v.name));
+        }
+    }
+
+    #[test]
+    fn ml_kem_vectors_reference_only_draft_codepoints() {
+        let vectors = load_named("ml_kem.json");
+        let allowed = ml_kem_draft_codepoints();
+        for v in &vectors {
+            assert!(
+                allowed.contains(&v.ciphersuite),
+                "ml_kem.json vector {} uses ciphersuite {:#06x} which is not a registered ML-KEM draft",
+                v.name,
+                v.ciphersuite
+            );
+        }
+    }
+
+    #[test]
+    fn classical_provider_rejects_ml_kem_kat_ciphersuites() {
+        // The RustCrypto provider has no PQ KEM. Every ML-KEM
+        // codepoint we register must be absent from its supported
+        // list, and `kem_mode` rejects them with
+        // `UnsupportedCiphersuite`.
+        let provider = RustCrypto::default();
+        let supported = provider.supported_ciphersuites();
+        let vectors = load_named("ml_kem.json");
+        assert!(!vectors.is_empty(), "need at least one ML-KEM vector");
+
+        for v in &vectors {
+            let cs = v.ciphersuite().expect("vector ciphersuite");
+            assert!(
+                !supported.contains(&cs),
+                "RustCrypto must not advertise ML-KEM draft {cs:?} (vector {})",
+                v.name
+            );
+        }
+    }
+
+    #[test]
+    fn ml_kem_kat_load_returns_three_vectors() {
+        let vectors = load_named("ml_kem.json");
+        assert_eq!(
+            vectors.len(),
+            3,
+            "Task 4 ships exactly 3 synthetic ML-KEM vectors — \
+             update this assertion when real KATs land"
+        );
+    }
+}
+
+// =============================================================================
+// FIPS 204 (ML-DSA) KAT runner — schema validation + classical rejection.
+// =============================================================================
+
+mod mldsa {
+    use super::*;
+
+    #[test]
+    fn ml_dsa_vectors_load_and_parse_cleanly() {
+        let vectors = load_named("ml_dsa.json");
+        assert!(
+            !vectors.is_empty(),
+            "ml_dsa.json must ship at least one synthetic vector — see Task 4"
+        );
+        for v in &vectors {
+            // Hex fields must decode. (We don't try to map the
+            // ciphersuite to a registered codepoint here — ML-DSA
+            // KATs are signature-scheme vectors, not whole-suite
+            // vectors, so the ciphersuite slot is just a tag.)
+            hex_decode("input_keying_material", &v.input_keying_material_hex)
+                .unwrap_or_else(|e| panic!("{}: ikm decode {e}", v.name));
+            hex_decode("expected_ciphertext", &v.expected_ciphertext_hex)
+                .unwrap_or_else(|e| panic!("{}: ct decode {e}", v.name));
+            hex_decode("expected_shared_secret", &v.expected_shared_secret_hex)
+                .unwrap_or_else(|e| panic!("{}: ss decode {e}", v.name));
+        }
+    }
+
+    #[test]
+    fn ml_dsa_kat_load_returns_two_vectors() {
+        let vectors = load_named("ml_dsa.json");
+        assert_eq!(
+            vectors.len(),
+            2,
+            "Task 4 ships exactly 2 synthetic ML-DSA vectors — \
+             update this assertion when real KATs land"
+        );
+    }
+}

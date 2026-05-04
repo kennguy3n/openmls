@@ -157,12 +157,18 @@ impl SecurityMode {
 
 /// Returns `true` if `cs`'s KEM is post-quantum / hybrid.
 ///
-/// Today the only such suite is X-Wing draft-06; this helper exists so we
-/// only have to extend one place when ML-KEM hybrids land.
+/// Covers both the X-Wing draft suite and the IETF MLS PQ draft
+/// ML-KEM hybrid / pure ML-KEM suites. Mirrors the
+/// [`HpkeKemType::is_draft_codepoint`] check at the KEM level — any
+/// suite whose KEM is currently a draft / private-use codepoint is by
+/// definition post-quantum or hybrid in this codebase.
 fn ciphersuite_uses_pq_kem(cs: Ciphersuite) -> bool {
     matches!(
         cs,
         Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448
     )
 }
 
@@ -224,6 +230,22 @@ mod tests {
             ),
             SecurityMode::PqConfidentiality
         );
+    }
+
+    #[test]
+    fn from_ciphersuite_ml_kem_drafts_are_pq_confidentiality() {
+        for cs in [
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519,
+            Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519,
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448,
+        ] {
+            // PQ / hybrid KEM + classical signature → PqConfidentiality.
+            assert_eq!(
+                SecurityMode::from_ciphersuite(cs),
+                SecurityMode::PqConfidentiality,
+                "expected PqConfidentiality for {cs:?}"
+            );
+        }
     }
 
     #[test]

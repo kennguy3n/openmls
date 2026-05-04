@@ -94,6 +94,10 @@ cargo test -p openmls --test pq_kat_tests
 cargo test -p openmls --test pq_lifecycle_tests
 cargo test -p openmls --test pq_apq_e2e_tests
 cargo test -p openmls --test pq_reinit_e2e_tests
+cargo test -p openmls --test pq_load_tests
+cargo test -p openmls --test pq_welcome_fanout_tests
+cargo test -p openmls --test pq_telemetry_integration_tests
+cargo test -p openmls --test pq_full_e2e_tests
 cargo test -p openmls --test multi_ciphersuite_public_api
 
 # Lint + format (matches CI).
@@ -171,6 +175,26 @@ and `messages` modules respectively.
 - [`group::pq_telemetry`](./openmls/src/group/pq_telemetry.rs)
   — 8-variant `PqTelemetryEvent` enum, `PqTelemetryEmitter` trait,
   and `NoOp` / `InMemory` reference emitters.
+  `KChatMlsConversation` accepts an `Arc<dyn PqTelemetryEmitter>` via
+  `set_telemetry_emitter`; orchestration entry points emit
+  `ApqBootstrapCompleted`, `PqProviderError`, `ResyncTriggered`,
+  `DowngradeAttempt`, `UnsupportedCiphersuite`, and `ReInitCompleted`
+  through the telemetry-aware wrappers
+  (`select_conversation_mode_with_emitter`,
+  `validate_mode_change_with_emitter`,
+  `complete_reinit_from_commit_with_emitter`).
+- [`messages::delivery_service::DeliveryService`](./openmls/src/messages/delivery_service.rs)
+  — in-memory reference Delivery Service. Wraps outbound messages
+  in `ApqDeliveryEnvelope`, enforces PQ-before-T ordering on FULL
+  commit pairs, and exposes per-group `enqueue` / `deliver_next` /
+  `deliver_all` / `pending_count` / `pending_full_pairs`.
+- [`group::migration_state::MigrationStateMachine`](./openmls/src/group/migration_state.rs)
+  — per-conversation upgrade lifecycle state machine:
+  `NotStarted` → `CapabilitiesCollected` → `KeyPackagesPublished` →
+  `ModeSelected` → `BootstrapInitiated` → `BootstrapComplete` →
+  `FirstFullCommitDone` → `Operational` | `Failed`. `advance` /
+  `can_advance` / `is_terminal` make the state machine cheap to
+  observe from dashboards and recovery code.
 
 ## Supported ciphersuites
 
@@ -198,13 +222,21 @@ RustCrypto provider does **not** implement any PQ primitives.
   value — see
   [`Ciphersuite::is_draft_codepoint()`](./traits/src/types.rs).
 
-Planned, tracking the
+Tracking the
 [IETF MLS PQ ciphersuite draft](https://datatracker.ietf.org/doc/draft-ietf-mls-mls-pq-cs/)
-(codepoints TBD until IANA assignment):
+(codepoints are draft / private-use until IANA assignment, currently in
+the `0xFE00`–`0xFEFF` range):
 
-- ML-KEM hybrid suites (ML-KEM + X25519/P-256, classical signatures) for
-  `PQ_CONFIDENTIALITY` deployments.
-- Pure ML-KEM suites (FIPS 203) once the IETF draft stabilizes.
+- **MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519** — ML-KEM-768 +
+  X25519 hybrid KEM with classical Ed25519 signatures, AES-256-GCM
+  AEAD. Draft codepoint `0xFE01`. Both providers currently reject the
+  suite with `CryptoError::UnsupportedCiphersuite`.
+- **MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519** — same KEM
+  with ChaCha20-Poly1305 AEAD. Draft codepoint `0xFE02`.
+- **MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448** — pure ML-KEM-1024
+  (FIPS 203) with Ed448 signatures. Draft codepoint `0xFE03`.
+
+Planned but not yet wired:
 - ML-DSA signature suites (FIPS 204) for `PQ_AUTHENTICITY` deployments.
   The `SignatureScheme` enum already exposes `MLDSA44`, `MLDSA65`, and
   `MLDSA87` variants with draft codepoints (`0x0904`–`0x0906`); both
