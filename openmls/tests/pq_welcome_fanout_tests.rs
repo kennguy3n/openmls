@@ -239,3 +239,168 @@ fn welcome_ciphersuite_consistent_across_a_batch() {
     // the structural invariant `add_members` relies on.
     assert_eq!(alice_group.ciphersuite(), CS);
 }
+
+// =============================================================================
+// High-scale `#[ignore]`d Welcome fanout tests (Task 6).
+//
+// These exercise Welcome emission for groups of 100, 500, and 1000
+// members and assert the size budget documented in
+// ARCHITECTURE.md (≈2669 bytes / X-Wing PQ KeyPackage). They are
+// `#[ignore]`d because the build-time cost of generating that many
+// keypairs is significant; run with
+// `cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored`.
+//
+// Each test prints the per-Welcome serialized size so a human
+// running the suite can spot regressions in the size budget.
+// =============================================================================
+
+/// Documented per-PQ-KeyPackage budget for X-Wing-shaped Welcomes.
+/// See ARCHITECTURE.md (line ~330) — this is the size we expect a
+/// classical-equivalent Welcome to live well under, so the assertion
+/// here is "Welcome is at most a small multiple of this number".
+const ARCHITECTURE_PQ_KEYPACKAGE_BUDGET_BYTES: usize = 2669;
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_welcome_fanout_one_hundred_members() {
+    welcome_fanout_at_scale(100);
+}
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_welcome_fanout_five_hundred_members() {
+    welcome_fanout_at_scale(500);
+}
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_welcome_fanout_one_thousand_members() {
+    welcome_fanout_at_scale(1_000);
+}
+
+fn welcome_fanout_at_scale(num_members: usize) {
+    use std::time::Instant;
+    let provider = OpenMlsRustCrypto::default();
+    let (mut alice_group, alice_signer) = group_for(&provider, "alice", CS);
+
+    // Generate `num_members` KeyPackages up front so the timing
+    // measurements isolate the add+serialize cost.
+    let kp_start = Instant::now();
+    let kps: Vec<KeyPackage> = (0..num_members)
+        .map(|i| key_package(&provider, &format!("member-{i:05}"), CS).0)
+        .collect();
+    let kp_elapsed = kp_start.elapsed();
+    eprintln!(
+        "fanout({num_members}): generated {num_members} KeyPackages in {:?}",
+        kp_elapsed
+    );
+
+    // Add every member in a single commit so the Welcome contains
+    // every joiner's encrypted secrets.
+    let add_start = Instant::now();
+    let (_, welcome_msg, _) = alice_group
+        .add_members(&provider, &alice_signer, &kps)
+        .expect("add bulk");
+    let add_elapsed = add_start.elapsed();
+
+    let serialized = welcome_msg.tls_serialize_detached().expect("serialize");
+    let total_size = serialized.len();
+    let per_member = total_size / num_members.max(1);
+    eprintln!(
+        "fanout({num_members}): bulk add+welcome in {:?}; welcome serialized = {} bytes \
+         ({} bytes / member)",
+        add_elapsed, total_size, per_member
+    );
+
+    // The classical Welcome's per-member overhead must be well under
+    // the PQ budget — pin it at 2× as a generous bound. If this ever
+    // trips it indicates the per-member encrypted secrets blob got
+    // unexpectedly large.
+    let upper_bound = 2 * ARCHITECTURE_PQ_KEYPACKAGE_BUDGET_BYTES;
+    assert!(
+        per_member < upper_bound,
+        "fanout({num_members}): per-member welcome size {per_member} >= upper bound {upper_bound}"
+    );
+
+    // Round-trip the Welcome through TLS codec — pins that the wire
+    // format is stable at scale.
+    let decoded = MlsMessageIn::tls_deserialize_exact(&serialized).expect("deserialize");
+    assert!(
+        matches!(decoded.extract(), MlsMessageBodyIn::Welcome(_)),
+        "fanout({num_members}): bulk add must emit a Welcome"
+    );
+
+    alice_group.merge_pending_commit(&provider).expect("merge");
+}
+
+#[test]
+#[ignore = "load test — run with `cargo test -- --ignored`"]
+fn load_apq_welcome_pair_size_tracks_classical() {
+    // ApqWelcome wraps two paired Welcomes plus an ApqInfo and a PSK
+    // ID. Verify the wrapped pair stays within ~3× the budget of a
+    // single classical Welcome at 100 members. This is a coarse
+    // upper bound — the real budget tightens once X-Wing lands.
+    use std::time::Instant;
+    let provider = OpenMlsRustCrypto::default();
+    let (mut alice_group_t, alice_signer_t) = group_for(&provider, "alice-t", CS);
+    let (mut alice_group_pq, alice_signer_pq) = group_for(&provider, "alice-pq", CS_ALT);
+
+    const NUM_MEMBERS: usize = 100;
+    let kps_t: Vec<KeyPackage> = (0..NUM_MEMBERS)
+        .map(|i| key_package(&provider, &format!("t-{i:05}"), CS).0)
+        .collect();
+    let kps_pq: Vec<KeyPackage> = (0..NUM_MEMBERS)
+        .map(|i| key_package(&provider, &format!("pq-{i:05}"), CS_ALT).0)
+        .collect();
+
+    let start = Instant::now();
+    let (_, welcome_t, _) = alice_group_t
+        .add_members(&provider, &alice_signer_t, &kps_t)
+        .expect("add t");
+    let (_, welcome_pq, _) = alice_group_pq
+        .add_members(&provider, &alice_signer_pq, &kps_pq)
+        .expect("add pq");
+    let elapsed = start.elapsed();
+
+    let apq_info = ApqInfo::new(
+        GroupId::from_slice(b"t-id"),
+        GroupId::from_slice(b"pq-id"),
+        0,
+        0,
+        CS,
+        CS_ALT,
+        SecurityMode::PqConfidentiality,
+    );
+    let welcome_t_inner = match welcome_t.body() {
+        openmls::framing::MlsMessageBodyOut::Welcome(w) => w.clone(),
+        _ => panic!("expected Welcome body"),
+    };
+    let welcome_pq_inner = match welcome_pq.body() {
+        openmls::framing::MlsMessageBodyOut::Welcome(w) => w.clone(),
+        _ => panic!("expected Welcome body"),
+    };
+    let pair = ApqWelcome::new_apq(
+        welcome_t_inner,
+        welcome_pq_inner,
+        apq_info,
+        PreSharedKeyId::external(b"apq-psk".to_vec(), b"nonce".to_vec()),
+    );
+    let bytes = pair.tls_serialize_detached().expect("serialize");
+    let total = bytes.len();
+    eprintln!(
+        "apq fanout({NUM_MEMBERS}): bulk add of two paired Welcomes in {:?}; \
+         apq welcome serialized = {total} bytes ({} bytes / member)",
+        elapsed,
+        total / NUM_MEMBERS
+    );
+    let upper_bound = 6 * ARCHITECTURE_PQ_KEYPACKAGE_BUDGET_BYTES * NUM_MEMBERS;
+    assert!(
+        total < upper_bound,
+        "apq fanout({NUM_MEMBERS}): wire size {total} >= upper bound {upper_bound}"
+    );
+
+    alice_group_t.merge_pending_commit(&provider).expect("merge t");
+    alice_group_pq
+        .merge_pending_commit(&provider)
+        .expect("merge pq");
+}
