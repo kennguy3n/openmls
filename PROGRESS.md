@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~80%**
+**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~90%**
 
 ## Version Targets
 
@@ -143,6 +143,35 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       (`openmls/src/group/pq_policy.rs`).
 - [x] Implement no-downgrade enforcement rules
       (`openmls/src/group/no_downgrade.rs`).
+- [x] Draft → final codepoint migration utility
+      (`openmls/src/ciphersuite/codepoint_migration.rs`). Static mapping
+      table (currently empty; populated when IANA assigns final
+      codepoints), `migrate_ciphersuite` / `migrate_kem_type` /
+      `migrate_signature_scheme` lookups, `needs_migration` predicate,
+      and `migrate_conversation_state` to rotate
+      `ConversationSecurityState::pinned_ciphersuite` once final
+      codepoints land. 12 unit tests pin the empty-table and round-trip
+      semantics so dropping a real row in is a one-line change.
+- [x] Idempotent client-side storage migration
+      (`openmls/src/group/storage_migration.rs`). `MigrationStep` enum
+      (group state / APQ info / conversation mapping / PSK material /
+      commit counters / anti-downgrade state), `StorageMigrationState`
+      with `NotStarted` / `InProgress(step)` / `Complete` /
+      `Failed(reason)`, `MigrationStorage` trait, and a `StorageMigrator`
+      driver that reads state, runs each step idempotently, persists
+      progress between steps, and resumes cleanly after a crash. 12 unit
+      tests cover fresh runs, resume from each intermediate step,
+      idempotent re-runs, and post-migration validation.
+- [x] External-join + credential-rotation FULL-commit triggers
+      (`openmls/src/group/apq_commit.rs`). `detect_external_join` /
+      `detect_credential_rotation` helpers walk a `StagedCommit`'s
+      proposals, `classify_proposal_types` projects a list of
+      `ProposalType`s onto the highest-priority `CommitTrigger`,
+      `auto_classify_commit_type` routes the trigger through
+      `PqPolicy::required_commit_type`, and
+      `KChatMlsConversation::classify_incoming_commit` exposes the
+      whole pipeline as one method on the conversation. 8 unit tests
+      pin the priority ladder and policy interaction.
 
 #### Server components
 
@@ -200,9 +229,51 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | ~~`commit_reinit` seals the old group before `complete_reinit` can run~~ | Fixed: `commit_reinit` now derives the Resumption(ReInit) PSK before sealing the old group and stores it on `ReInitCommit`. `complete_reinit` consumes the pre-derived secret instead of calling `export_secret` on an inactive group |
 | ~~No migration state machine~~                   | Fixed: per-conversation `MigrationStateMachine` in `openmls/src/group/migration_state.rs` with the 8-state fine-grained lifecycle and the higher-level `ConversationLifecycle` projection wired into `KChatMlsConversation::migration_state` |
 | ~~No server-side capability protocol~~            | Fixed: wire types in `openmls/src/credentials/capability_protocol.rs` (publish / fetch / notification request-response messages with TLS codecs and signature verification, layered on top of the existing in-memory `CapabilityRegistry`) |
-| No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs (six ML-KEM hybrid + pure ML-KEM 768/1024 + ML-DSA-signed draft codepoints currently shipped) |
+| No final IETF PQ ciphersuite codepoints          | Migration plumbing landed in `openmls/src/ciphersuite/codepoint_migration.rs`; static draft → final mapping table is empty pending IANA assignment, then every `migrate_*` lookup and `migrate_conversation_state` rotation will fire automatically. Six ML-KEM hybrid + pure ML-KEM 768/1024 + ML-DSA-signed draft codepoints currently shipped. |
+| No persistent client storage migration driver    | ~~Fixed~~: idempotent `StorageMigrator` in `openmls/src/group/storage_migration.rs` with crash-resume support — concrete backends still need to implement the `MigrationStorage` trait |
 
 ## Changelog
+
+### 2026-05-04 (PQ batch 5 — codepoint / storage migration + auto-classified triggers)
+
+- Added `openmls/src/ciphersuite/codepoint_migration.rs` — the single
+  source of truth for draft → final IANA codepoint migration. The
+  `CodepointMigration` struct holds three `&'static [Row]` tables for
+  ciphersuites / KEMs / signature schemes; today every table is empty
+  because IANA has not yet assigned final codepoints, so every
+  `migrate_*` returns `None`. `needs_migration(cs)` lights up for every
+  draft suite (independent of whether a final codepoint is available
+  yet), and `migrate_conversation_state` rotates a
+  `ConversationSecurityState::pinned_ciphersuite` once a final value is
+  on file. The structure is wired in *now* so landing a real
+  assignment is a one-row table change. 12 unit tests pin the
+  empty-table and round-trip semantics.
+- Added `openmls/src/group/storage_migration.rs` — idempotent
+  client-side storage migration driver. `MigrationStep` is the ordered
+  list (`MigrateGroupState` → `MigrateApqInfo` →
+  `MigrateConversationMapping` → `MigratePskMaterial` →
+  `MigrateCommitCounters` → `MigrateAntiDowngradeState`),
+  `StorageMigrationState` is the persisted progress marker
+  (`NotStarted` / `InProgress(step)` / `Complete` / `Failed(reason)`),
+  and `StorageMigrator` is the driver that runs each step
+  check-before-write, persists state between steps, and resumes from
+  the marker on the next start. `validate_post_migration` verifies the
+  schema is in the expected post-condition. Backed by a
+  `MigrationStorage` trait so concrete backends (SQLite, Sled, in-memory
+  test doubles) plug in cleanly. 12 unit tests cover the fresh-run
+  happy path, resume after crash at each step, idempotent re-run,
+  validation pass/fail, and persistence round-trip.
+- Wired Phase 5's "external join → FULL" and "credential rotation →
+  FULL" triggers in `openmls/src/group/apq_commit.rs`.
+  `detect_external_join` / `detect_credential_rotation` walk a
+  `StagedCommit`'s proposals; `classify_proposal_types` projects a
+  list of `ProposalType`s onto the highest-priority `CommitTrigger`
+  (ExternalInit > Add > Remove > Update > everything-else);
+  `auto_classify_commit_type` routes the chosen trigger through
+  `PqPolicy::required_commit_type`. The conversation surface picks up
+  the new logic via `KChatMlsConversation::classify_incoming_commit`,
+  which orchestration code can call when processing an incoming commit.
+  8 unit tests pin the priority ladder and policy interaction.
 
 ### 2026-05-04 (PQ batch 4 — provider impls + wire protocols)
 

@@ -26,10 +26,13 @@ use openmls_traits::types::Ciphersuite;
 use crate::ciphersuite::SecurityMode;
 use crate::extensions::apq_info::{ApqInfo, ApqInfoError};
 use crate::framing::{MlsMessageBodyOut, MlsMessageOut};
-use crate::group::apq_commit::{APQ_PSK_ID_LENGTH, APQ_PSK_LABEL, APQ_PSK_LENGTH};
+use crate::group::apq_commit::{
+    auto_classify_commit_type, APQ_PSK_ID_LENGTH, APQ_PSK_LABEL, APQ_PSK_LENGTH,
+};
 use crate::group::migration_state::{ConversationLifecycle, MigrationStateMachine};
+use crate::group::mls_group::staged_commit::StagedCommit;
 use crate::group::mls_group::MlsGroup;
-use crate::group::pq_policy::PqPolicy;
+use crate::group::pq_policy::{CommitType, PqPolicy};
 use crate::group::pq_telemetry::{NoOpTelemetryEmitter, PqTelemetryEmitter};
 use crate::key_packages::KeyPackage;
 use crate::messages::apq_welcome::{ApqWelcome, ApqWelcomeError};
@@ -242,6 +245,30 @@ impl KChatMlsConversation {
     /// conversation. Pass [`None`] to clear it.
     pub fn set_migration_state(&mut self, machine: Option<MigrationStateMachine>) {
         self.migration_state = machine;
+    }
+
+    /// Classify an incoming [`StagedCommit`] under this conversation's
+    /// [`PqPolicy`].
+    ///
+    /// Returns the [`CommitType`] the orchestration layer must run on
+    /// the conversation in response — `Full` means "also derive a new
+    /// APQ PSK from the PQ session", `Partial` means "advance the T
+    /// session only", `None` means "no commit needed".
+    ///
+    /// Phase 5 of the migration plan calls out two specific triggers
+    /// that *must* land as FULL commits regardless of cadence:
+    ///
+    /// - **External join** — detected via
+    ///   [`crate::group::apq_commit::detect_external_join`].
+    /// - **Credential rotation** — detected via
+    ///   [`crate::group::apq_commit::detect_credential_rotation`].
+    ///
+    /// `classify_incoming_commit` walks the commit's proposals and
+    /// returns the strictest [`CommitType`] required by any trigger
+    /// present, using the priority ladder in
+    /// [`crate::group::apq_commit::classify_proposal_types`].
+    pub fn classify_incoming_commit(&self, commit: &StagedCommit) -> CommitType {
+        auto_classify_commit_type(self, commit)
     }
 
     /// Project the optional [`MigrationStateMachine`] onto a

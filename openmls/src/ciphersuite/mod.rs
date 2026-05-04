@@ -22,6 +22,7 @@ mod reuse_guard;
 mod secret;
 
 // Public
+pub mod codepoint_migration;
 pub mod hash_ref;
 pub mod security_mode;
 pub mod signable;

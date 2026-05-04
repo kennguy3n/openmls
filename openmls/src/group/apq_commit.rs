@@ -43,8 +43,9 @@ use openmls_traits::{random::OpenMlsRand, signatures::Signer};
 
 use crate::framing::MlsMessageOut;
 use crate::group::kchat_conversation::KChatMlsConversation;
+use crate::group::mls_group::staged_commit::StagedCommit;
 use crate::group::pq_policy::{CommitTrigger, CommitType};
-use crate::messages::proposals::{PreSharedKeyProposal, Proposal};
+use crate::messages::proposals::{PreSharedKeyProposal, Proposal, ProposalType};
 use crate::schedule::psk::PreSharedKeyId;
 use crate::storage::OpenMlsProvider;
 
@@ -386,6 +387,106 @@ where
     Ok(PartialCommitResult { t_commit })
 }
 
+// ---------------------------------------------------------------------------
+// Commit-trigger auto-classification (Task 10)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `commit` contains an [`ExternalInit`](Proposal::ExternalInit)
+/// proposal. ExternalInit is the wire-level signal of an external join — a new
+/// device joining a group without an explicit invite. Phase 5 mandates a FULL
+/// APQ commit immediately after every external join.
+pub fn detect_external_join(commit: &StagedCommit) -> bool {
+    commit
+        .queued_proposals()
+        .any(|p| p.proposal().proposal_type() == ProposalType::ExternalInit)
+}
+
+/// Returns `true` if `commit` contains an [`Update`](Proposal::Update) proposal.
+///
+/// MLS Update proposals always carry a fresh `LeafNode` and may rotate the
+/// member's credential or signature key. Without prior leaf-node state to
+/// compare against, this helper is intentionally **conservative**: every
+/// Update is treated as a possible credential rotation. Over-triggering FULL
+/// is safe (extra PQ rekey); under-triggering would silently weaken PQ
+/// authenticity, so the conservative direction is the right one.
+pub fn detect_credential_rotation(commit: &StagedCommit) -> bool {
+    commit
+        .queued_proposals()
+        .any(|p| p.proposal().proposal_type() == ProposalType::Update)
+}
+
+/// Map a list of proposal types in a commit onto the [`CommitTrigger`] that
+/// best describes the commit, using a fixed priority ladder.
+///
+/// Priority (highest first):
+///
+/// 1. `ExternalInit`           → [`CommitTrigger::ExternalJoin`]
+/// 2. `Add`                    → [`CommitTrigger::AddMember`]
+/// 3. `Remove`                 → [`CommitTrigger::RemoveMember`]
+/// 4. `Update`                 → [`CommitTrigger::CredentialRotation`]
+/// 5. (anything else / empty)  → [`CommitTrigger::PeriodicRefresh`]
+///
+/// Adds and Removes are intentionally above Updates: a single commit that
+/// adds a member *and* updates someone's leaf is overall a membership
+/// change, which is a higher-priority FULL trigger than a credential
+/// rotation. ExternalInit dominates everything because it's only present
+/// when a new device is force-joining.
+pub fn classify_proposal_types<I>(types: I) -> CommitTrigger
+where
+    I: IntoIterator<Item = ProposalType>,
+{
+    let mut has_external_init = false;
+    let mut has_add = false;
+    let mut has_remove = false;
+    let mut has_update = false;
+    for t in types {
+        match t {
+            ProposalType::ExternalInit => has_external_init = true,
+            ProposalType::Add => has_add = true,
+            ProposalType::Remove => has_remove = true,
+            ProposalType::Update => has_update = true,
+            _ => {}
+        }
+    }
+    if has_external_init {
+        CommitTrigger::ExternalJoin
+    } else if has_add {
+        CommitTrigger::AddMember
+    } else if has_remove {
+        CommitTrigger::RemoveMember
+    } else if has_update {
+        CommitTrigger::CredentialRotation
+    } else {
+        CommitTrigger::PeriodicRefresh
+    }
+}
+
+/// Inspect `commit`'s proposals and return the [`CommitType`] required by
+/// the conversation's [`PqPolicy`].
+///
+/// Equivalent to:
+///
+/// ```text
+/// conversation
+///     .pq_policy()
+///     .required_commit_type(classify_proposal_types(commit.queued_proposals()...))
+/// ```
+///
+/// Used by orchestration code that processes an *incoming* commit and
+/// needs to decide whether to also derive a new APQ PSK (`Full`) or
+/// merely advance the T session (`Partial`).
+pub fn auto_classify_commit_type(
+    conversation: &KChatMlsConversation,
+    commit: &StagedCommit,
+) -> CommitType {
+    let trigger = classify_proposal_types(
+        commit
+            .queued_proposals()
+            .map(|p| p.proposal().proposal_type()),
+    );
+    conversation.pq_policy().required_commit_type(trigger)
+}
+
 #[cfg(test)]
 mod tests {
     //! Skeleton tests. These exercise the **flow logic** (mode checks,
@@ -546,5 +647,124 @@ mod tests {
         assert_eq!(APQ_PSK_LABEL, "kchat-apq-psk");
         assert_eq!(APQ_PSK_LENGTH, 32);
         assert_eq!(APQ_PSK_ID_LENGTH, 16);
+    }
+
+    // -------- Task 10: commit-trigger auto-classification --------
+
+    /// A commit that contains an `ExternalInit` proposal must classify as
+    /// `ExternalJoin` regardless of which other proposals are present.
+    #[test]
+    fn classify_proposal_types_returns_external_join_for_external_init() {
+        let trigger = classify_proposal_types([ProposalType::ExternalInit]);
+        assert_eq!(trigger, CommitTrigger::ExternalJoin);
+    }
+
+    #[test]
+    fn classify_proposal_types_returns_add_member_for_add() {
+        let trigger = classify_proposal_types([ProposalType::Add]);
+        assert_eq!(trigger, CommitTrigger::AddMember);
+    }
+
+    #[test]
+    fn classify_proposal_types_returns_remove_member_for_remove() {
+        let trigger = classify_proposal_types([ProposalType::Remove]);
+        assert_eq!(trigger, CommitTrigger::RemoveMember);
+    }
+
+    /// Update alone — credential rotation. The conservative direction:
+    /// an Update proposal *may* rotate the leaf's credential, so we treat
+    /// every Update as a CredentialRotation trigger.
+    #[test]
+    fn classify_proposal_types_returns_credential_rotation_for_update() {
+        let trigger = classify_proposal_types([ProposalType::Update]);
+        assert_eq!(trigger, CommitTrigger::CredentialRotation);
+    }
+
+    /// An empty commit (or one carrying only `PreSharedKey` / custom
+    /// proposals) is treated as a PeriodicRefresh — the lowest-priority
+    /// FULL trigger under PqRequired.
+    #[test]
+    fn classify_proposal_types_returns_periodic_refresh_for_empty() {
+        let trigger = classify_proposal_types(std::iter::empty());
+        assert_eq!(trigger, CommitTrigger::PeriodicRefresh);
+
+        // PSK-only is also classified as PeriodicRefresh (it does not
+        // change membership or rotate credentials).
+        let trigger = classify_proposal_types([ProposalType::PreSharedKey]);
+        assert_eq!(trigger, CommitTrigger::PeriodicRefresh);
+    }
+
+    /// A commit that contains both an external-init AND an Add must still
+    /// classify as `ExternalJoin` — external-init dominates.
+    #[test]
+    fn classify_proposal_types_external_init_dominates_other_proposals() {
+        let trigger = classify_proposal_types([
+            ProposalType::Add,
+            ProposalType::Update,
+            ProposalType::ExternalInit,
+            ProposalType::Remove,
+        ]);
+        assert_eq!(trigger, CommitTrigger::ExternalJoin);
+    }
+
+    /// A combined Add + Update commit is overall a membership change;
+    /// Add wins over Update (a credential rotation alongside a member
+    /// add is still primarily an add).
+    #[test]
+    fn classify_proposal_types_add_beats_update_in_priority() {
+        let trigger = classify_proposal_types([ProposalType::Update, ProposalType::Add]);
+        assert_eq!(trigger, CommitTrigger::AddMember);
+
+        let trigger = classify_proposal_types([ProposalType::Update, ProposalType::Remove]);
+        assert_eq!(trigger, CommitTrigger::RemoveMember);
+    }
+
+    /// End-to-end: classify_proposal_types feeds
+    /// `PqPolicy::required_commit_type` and resolves to a `CommitType`.
+    /// Verify each of the four key transitions under the PQ policies.
+    #[test]
+    fn auto_classify_commit_type_routes_each_trigger_through_policy() {
+        // External join → FULL under both PqConfidentiality and PqRequired.
+        let trigger = classify_proposal_types([ProposalType::ExternalInit]);
+        for policy in [PqPolicy::PqConfidentiality, PqPolicy::PqRequired] {
+            assert_eq!(
+                policy.required_commit_type(trigger),
+                CommitType::Full,
+                "ExternalJoin under {policy:?} must be FULL"
+            );
+        }
+
+        // Credential rotation → FULL under both PQ policies.
+        let trigger = classify_proposal_types([ProposalType::Update]);
+        for policy in [PqPolicy::PqConfidentiality, PqPolicy::PqRequired] {
+            assert_eq!(
+                policy.required_commit_type(trigger),
+                CommitType::Full,
+                "CredentialRotation under {policy:?} must be FULL"
+            );
+        }
+
+        // PeriodicRefresh under PqConfidentiality is PARTIAL (cadence-driven).
+        let trigger = classify_proposal_types(std::iter::empty());
+        assert_eq!(
+            PqPolicy::PqConfidentiality.required_commit_type(trigger),
+            CommitType::Partial,
+            "PeriodicRefresh under PqConfidentiality must be PARTIAL"
+        );
+
+        // PeriodicRefresh under PqRequired is FULL.
+        assert_eq!(
+            PqPolicy::PqRequired.required_commit_type(trigger),
+            CommitType::Full,
+            "PeriodicRefresh under PqRequired must be FULL"
+        );
+
+        // Classical policy: any membership/credential trigger is PARTIAL
+        // (no PQ session to re-key).
+        let trigger = classify_proposal_types([ProposalType::Add]);
+        assert_eq!(
+            PqPolicy::Classical.required_commit_type(trigger),
+            CommitType::Partial
+        );
     }
 }
