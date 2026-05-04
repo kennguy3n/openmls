@@ -73,7 +73,9 @@ pub type CapabilityVersion = u64;
 /// the device's identity key, encoded in whatever format
 /// [`OpenMlsCrypto::verify_signature`] expects for the supplied
 /// `signature_scheme`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize,
+)]
 pub struct CapabilityPublishRequest {
     /// Opaque user identifier; mirrors the `user_id` key in
     /// [`CapabilityRegistry`].
@@ -98,7 +100,9 @@ pub struct CapabilityPublishRequest {
 /// optimistically can match this against their pending state. The
 /// server SHOULD reject an out-of-date publish (lower version stamp)
 /// rather than silently accept it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize,
+)]
 pub struct CapabilityPublishResponse {
     /// Echo of the published `(user_id, device_id)` tuple so a single
     /// pipelined RPC channel doesn't have to track outstanding
@@ -127,7 +131,9 @@ pub struct CapabilityFetchKey {
 /// Batching is encouraged (one request per group, not one per peer) so
 /// the server can dedupe lookups and the client doesn't pay
 /// `O(num_peers)` round-trip latency.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize,
+)]
 pub struct CapabilityFetchRequest {
     /// One entry per `(user_id, device_id)` tuple the client wants to
     /// learn about.
@@ -140,7 +146,9 @@ pub struct CapabilityFetchRequest {
 /// requested device. `Some(_)` carries the device's most recent signed
 /// capability blob, which the client MUST re-verify on receipt — the
 /// server is not trusted to forge or mutate signatures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize,
+)]
 pub struct FetchedCapability {
     /// See [`CapabilityFetchKey::user_id`].
     pub user_id: VLBytes,
@@ -159,7 +167,9 @@ pub struct FetchedCapability {
 ///
 /// Order is **not** guaranteed to match the request — callers should
 /// match by `(user_id, device_id)` rather than positional index.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize,
+)]
 pub struct CapabilityFetchResponse {
     /// One entry per device the server has a result for; missing
     /// devices appear with `capability == None`.
@@ -173,7 +183,9 @@ pub struct CapabilityFetchResponse {
 /// device_id)` tuple. Clients MUST NOT trust the new `version` until
 /// they fetch the actual signed capability blob and verify the
 /// signature themselves.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserialize, TlsSize,
+)]
 pub struct CapabilityUpdateNotification {
     /// See [`CapabilityFetchKey::user_id`].
     pub user_id: VLBytes,
@@ -319,14 +331,8 @@ mod tests {
         let cs = classical_cs();
         let scheme = cs.signature_algorithm();
         let keypair = SignatureKeyPair::new(scheme).expect("keypair generation");
-        let mut cap = DeviceCapability::new(
-            1,
-            vec![cs],
-            vec![],
-            false,
-            false,
-            "rustcrypto".to_string(),
-        );
+        let mut cap =
+            DeviceCapability::new(1, vec![cs], vec![], false, false, "rustcrypto".to_string());
         cap.sign(scheme, keypair.private(), provider.crypto())
             .expect("sign capability");
         (cap, keypair)
@@ -407,23 +413,19 @@ mod tests {
     fn process_publish_rejects_unsigned_capability() {
         let provider = OpenMlsRustCrypto::default();
         let cs = classical_cs();
-        let keypair =
-            SignatureKeyPair::new(cs.signature_algorithm()).expect("keypair generation");
+        let keypair = SignatureKeyPair::new(cs.signature_algorithm()).expect("keypair generation");
         // Build the capability but skip `.sign(...)`.
-        let cap = DeviceCapability::new(
-            1,
-            vec![cs],
-            vec![],
-            false,
-            false,
-            "rustcrypto".to_string(),
-        );
+        let cap =
+            DeviceCapability::new(1, vec![cs], vec![], false, false, "rustcrypto".to_string());
         let req = publish_request(b"alice", b"phone", cap, &keypair);
 
         let mut registry = CapabilityRegistry::new();
         let err = process_publish(&mut registry, req, 1, provider.crypto())
             .expect_err("unsigned blob must be rejected");
-        assert_eq!(err, ProtocolError::Registry(RegistryError::UnsignedCapability));
+        assert_eq!(
+            err,
+            ProtocolError::Registry(RegistryError::UnsignedCapability)
+        );
         assert_eq!(registry.len(), 0);
     }
 
@@ -447,7 +449,10 @@ mod tests {
         let mut registry = CapabilityRegistry::new();
         let err = process_publish(&mut registry, req, 1, provider.crypto())
             .expect_err("signature mismatch must be rejected");
-        assert_eq!(err, ProtocolError::Registry(RegistryError::InvalidSignature));
+        assert_eq!(
+            err,
+            ProtocolError::Registry(RegistryError::InvalidSignature)
+        );
         assert_eq!(registry.len(), 0);
     }
 
@@ -534,8 +539,7 @@ mod tests {
         // Round-trip through the wire format and re-verify on the
         // far side.
         let bytes = returned.tls_serialize_detached().expect("serialize");
-        let recovered =
-            DeviceCapability::tls_deserialize_exact(&bytes).expect("deserialize");
+        let recovered = DeviceCapability::tls_deserialize_exact(&bytes).expect("deserialize");
         recovered
             .verify(
                 classical_cs().signature_algorithm(),

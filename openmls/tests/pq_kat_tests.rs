@@ -466,12 +466,7 @@ mod mldsa_runner {
         tampered[mid] ^= 0x01;
         if provider
             .crypto()
-            .verify_signature(
-                SignatureScheme::MLDSA65,
-                message.as_bytes(),
-                &vk,
-                &tampered,
-            )
+            .verify_signature(SignatureScheme::MLDSA65, message.as_bytes(), &vk, &tampered)
             .is_ok()
         {
             return Err(KatError::Mismatch {

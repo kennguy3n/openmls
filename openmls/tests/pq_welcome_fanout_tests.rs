@@ -399,7 +399,9 @@ fn load_apq_welcome_pair_size_tracks_classical() {
         "apq fanout({NUM_MEMBERS}): wire size {total} >= upper bound {upper_bound}"
     );
 
-    alice_group_t.merge_pending_commit(&provider).expect("merge t");
+    alice_group_t
+        .merge_pending_commit(&provider)
+        .expect("merge t");
     alice_group_pq
         .merge_pending_commit(&provider)
         .expect("merge pq");

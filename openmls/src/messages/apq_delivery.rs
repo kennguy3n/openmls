@@ -102,9 +102,7 @@ pub enum ApqOrderingError {
     /// protocol pins PQ-first for FULL commits — anything else means
     /// either the transport is buggy or someone is trying to feed the
     /// receiver a misordered pair.
-    #[error(
-        "FULL-commit pair must be ordered PqFirst, but ordering was declared as {declared:?}"
-    )]
+    #[error("FULL-commit pair must be ordered PqFirst, but ordering was declared as {declared:?}")]
     FullCommitNotPqFirst {
         /// What the wire actually said.
         declared: ApqDeliveryOrder,

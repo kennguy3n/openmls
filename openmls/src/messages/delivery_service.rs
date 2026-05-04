@@ -39,9 +39,7 @@ use crate::framing::MlsMessageOut;
 use crate::group::GroupId;
 
 /// Which APQ session a delivered message belongs to.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SessionSide {
     /// Classical / T session.
     T,

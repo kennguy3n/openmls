@@ -741,13 +741,9 @@ impl Ciphersuite {
             | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
             | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
             | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519
-            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519 => {
-                SignatureScheme::ED25519
-            }
+            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519 => SignatureScheme::ED25519,
             Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65
-            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65 => {
-                SignatureScheme::MLDSA65
-            }
+            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65 => SignatureScheme::MLDSA65,
             Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256 => {
                 SignatureScheme::ECDSA_SECP256R1_SHA256
             }
@@ -801,9 +797,7 @@ impl Ciphersuite {
             | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
             | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519
             | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65
-            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65 => {
-                HpkeKdfType::HkdfSha384
-            }
+            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65 => HpkeKdfType::HkdfSha384,
             Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
             | Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521
             | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448

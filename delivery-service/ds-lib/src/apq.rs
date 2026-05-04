@@ -105,9 +105,9 @@ impl Deserialize for ApqEnvelope {
         let tag = u8::tls_deserialize(reader)?;
         match tag {
             ENVELOPE_TAG_MESSAGE => Ok(ApqEnvelope::Message(ApqMessage::tls_deserialize(reader)?)),
-            ENVELOPE_TAG_COMMIT_PAIR => Ok(ApqEnvelope::CommitPair(ApqCommitPair::tls_deserialize(
-                reader,
-            )?)),
+            ENVELOPE_TAG_COMMIT_PAIR => Ok(ApqEnvelope::CommitPair(
+                ApqCommitPair::tls_deserialize(reader)?,
+            )),
             other => Err(Error::DecodingError(format!(
                 "unknown ApqEnvelope tag {other}"
             ))),
