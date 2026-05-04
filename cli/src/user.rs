@@ -630,24 +630,54 @@ impl User {
     /// Build a [`DeviceCapability`] for this user's identity and sign
     /// it with the user's signing key. Mirrors what a real KChat
     /// device would publish to the capability registry on startup.
+    ///
+    /// Every advertised ciphersuite is probed against the runtime
+    /// crypto provider via
+    /// [`OpenMlsCrypto::supports`](openmls_traits::crypto::OpenMlsCrypto::supports)
+    /// before it is added to the capability. This avoids the failure
+    /// mode where a CLI built with `--features xwing` advertises X-Wing
+    /// even though the underlying provider (RustCrypto) rejects the
+    /// suite at `MlsGroup` creation time.
     pub fn device_capability(&self) -> Result<DeviceCapability, String> {
-        let mut classical = vec![CIPHERSUITE];
-        // Surface every classical RFC 9420 suite the rust-crypto provider
-        // supports, so peers can pick a stronger one.
-        classical.push(Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519);
+        let crypto = self.provider.crypto();
 
-        // `mut` is conditional on the `xwing` feature — without it
-        // this vector is left empty.
-        #[cfg_attr(not(feature = "xwing"), allow(unused_mut))]
-        let mut pq_ciphersuites: Vec<Ciphersuite> = Vec::new();
-        #[cfg(feature = "xwing")]
-        {
-            pq_ciphersuites.push(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519);
-        }
-        // ML-DSA-65 signing requires the `mldsa` feature on `openmls`.
-        // Anything else means we can't claim PQ authenticity.
+        // Only advertise what the live provider can actually deliver.
+        // Probing instead of static listing means swapping the provider
+        // (RustCrypto → libcrux) automatically widens the advertised
+        // capability without code edits in this function.
+        let candidate_classical: &[Ciphersuite] = &[
+            CIPHERSUITE,
+            Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+        ];
+        let classical: Vec<Ciphersuite> = candidate_classical
+            .iter()
+            .copied()
+            .filter(|cs| crypto.supports(*cs).is_ok())
+            .collect();
+
+        let candidate_pq: &[Ciphersuite] = &[
+            #[cfg(feature = "xwing")]
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
+            #[cfg(feature = "mldsa")]
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65,
+        ];
+        let pq_ciphersuites: Vec<Ciphersuite> = candidate_pq
+            .iter()
+            .copied()
+            .filter(|cs| crypto.supports(*cs).is_ok())
+            .collect();
+
+        // PQ authenticity additionally requires that the provider can
+        // both KEM and sign with PQ primitives. Probe an ML-DSA-signed
+        // ciphersuite (`MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65`,
+        // codepoint `0xFE05`). If the live provider rejects the suite
+        // — RustCrypto today does — we cannot honestly claim PQ
+        // authenticity, regardless of whether the `mldsa` feature flag
+        // is set on the CLI.
         #[cfg(feature = "mldsa")]
-        let pq_auth_supported = true;
+        let pq_auth_supported = crypto
+            .supports(Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65)
+            .is_ok();
         #[cfg(not(feature = "mldsa"))]
         let pq_auth_supported = false;
 

@@ -117,6 +117,16 @@ pub enum SqliteMigrationError {
     /// Underlying rusqlite error.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    /// `run_migration` was called on a backend whose state is
+    /// `Failed(_)`. Mirrors
+    /// `openmls::group::storage_migration::MigrationError::PreviouslyFailed`
+    /// so callers cannot silently re-run past a failed step and end up
+    /// with `Complete` state that masks a real error.
+    #[error("previous migration attempt failed: {reason}")]
+    PreviouslyFailed {
+        /// Reason captured from the prior `Failed(reason)` state.
+        reason: String,
+    },
 }
 
 impl<ConnectionRef: Borrow<Connection>> SqliteMigrationStorage<ConnectionRef> {
@@ -343,7 +353,15 @@ impl<ConnectionRef: Borrow<Connection>> SqliteMigrationStorage<ConnectionRef> {
     /// should go through
     /// `openmls::group::storage_migration::StorageMigrator` so
     /// crash-resume is exercised through the trait surface.
-    pub fn run_migration(&self) -> Result<(), rusqlite::Error> {
+    ///
+    /// Returns immediately with `Ok(())` if state is already
+    /// [`MigrationStateRow::Complete`], and returns
+    /// [`SqliteMigrationError::PreviouslyFailed`] without touching any
+    /// step if state is [`MigrationStateRow::Failed`]. This mirrors the
+    /// canonical `StorageMigrator::run_migration` short-circuit so a
+    /// previously-failed migration cannot silently be overwritten with
+    /// `Complete` by re-running the convenience method.
+    pub fn run_migration(&self) -> Result<(), SqliteMigrationError> {
         let steps: &[MigrationStepRow] = &[
             MigrationStepRow::MigrateGroupState,
             MigrationStepRow::MigrateApqInfo,
@@ -353,8 +371,18 @@ impl<ConnectionRef: Borrow<Connection>> SqliteMigrationStorage<ConnectionRef> {
             MigrationStepRow::MigrateAntiDowngradeState,
         ];
 
-        if matches!(self.read_state()?, MigrationStateRow::NotStarted) {
-            self.persist_state(&MigrationStateRow::InProgress(steps[0]))?;
+        match self.read_state()? {
+            MigrationStateRow::Complete => return Ok(()),
+            MigrationStateRow::Failed(reason) => {
+                return Err(SqliteMigrationError::PreviouslyFailed { reason });
+            }
+            MigrationStateRow::NotStarted => {
+                self.persist_state(&MigrationStateRow::InProgress(steps[0]))?;
+            }
+            // Resume from whatever step is recorded; the migrate_*
+            // helpers below are individually idempotent so we always
+            // re-run the full sequence.
+            MigrationStateRow::InProgress(_) => {}
         }
 
         for step in steps {
@@ -447,6 +475,34 @@ mod tests {
         s.run_migration().expect("first run");
         // Second run must be a no-op (no errors).
         s.run_migration().expect("second run");
+        assert_eq!(s.read_state().unwrap(), MigrationStateRow::Complete);
+    }
+
+    #[test]
+    fn run_migration_on_failed_state_returns_error_without_overwriting() {
+        let s = fresh_storage();
+        s.persist_state(&MigrationStateRow::Failed("disk full".into()))
+            .unwrap();
+        let err = s
+            .run_migration()
+            .expect_err("must refuse to run past Failed state");
+        match err {
+            SqliteMigrationError::PreviouslyFailed { reason } => assert_eq!(reason, "disk full"),
+            other => panic!("expected PreviouslyFailed, got {other:?}"),
+        }
+        // Crucially: state must remain `Failed`, not be overwritten with
+        // `Complete`.
+        assert_eq!(
+            s.read_state().unwrap(),
+            MigrationStateRow::Failed("disk full".into()),
+        );
+    }
+
+    #[test]
+    fn run_migration_on_complete_state_is_noop() {
+        let s = fresh_storage();
+        s.persist_state(&MigrationStateRow::Complete).unwrap();
+        s.run_migration().expect("complete state is a no-op");
         assert_eq!(s.read_state().unwrap(), MigrationStateRow::Complete);
     }
 

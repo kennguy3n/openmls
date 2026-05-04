@@ -58,7 +58,7 @@ mldsa = ["dep:libcrux-ml-dsa"]
 mldsa44 = ["dep:libcrux-ml-dsa"]
 # Enable the ML-DSA-87 signature scheme (FIPS 204).
 #
-# Same caveats as `mldsa`. Codepoint `0x0907` (draft / private-use).
+# Same caveats as `mldsa`. Codepoint `0x0906` (draft / private-use).
 mldsa87 = ["dep:libcrux-ml-dsa"]
 
 extensions-draft-08 = [
