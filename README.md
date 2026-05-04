@@ -92,6 +92,8 @@ cargo test -p openmls --test pq_downgrade_tests
 cargo test -p openmls --test pq_interop_tests
 cargo test -p openmls --test pq_kat_tests
 cargo test -p openmls --test pq_lifecycle_tests
+cargo test -p openmls --test pq_apq_e2e_tests
+cargo test -p openmls --test pq_reinit_e2e_tests
 cargo test -p openmls --test multi_ciphersuite_public_api
 
 # Lint + format (matches CI).
@@ -154,6 +156,21 @@ and `messages` modules respectively.
   — Recovery (`detect_desync`, `resync_from_pq`, `resync_from_t`,
   `force_resync`) for clients that miss one half of a FULL commit
   pair (`MAX_EPOCH_DRIFT = 1`).
+- [`credentials::capability_registry::CapabilityRegistry`](./openmls/src/credentials/capability_registry.rs)
+  — in-memory Phase 0 server-side capability registry. Verifies the
+  signature on each `DeviceCapability` before storing.
+- [`key_packages::key_package_service::KeyPackageService`](./openmls/src/key_packages/key_package_service.rs)
+  — in-memory Phase 1 KeyPackage server scaffold with one-time
+  consumption, last-resort fallback, and `expire_before` bulk purge.
+- [`group::conversation_metadata::ConversationMetadataService`](./openmls/src/group/conversation_metadata.rs)
+  — in-memory conversation security-state tracker; mode and
+  `ApqInfo` updates run through the no-downgrade validators.
+- [`key_packages::rate_limiter::KeyPackageFetchRateLimiter`](./openmls/src/key_packages/rate_limiter.rs)
+  — sliding-window per-device rate limiter for PQ KeyPackage
+  fetches.
+- [`group::pq_telemetry`](./openmls/src/group/pq_telemetry.rs)
+  — 8-variant `PqTelemetryEvent` enum, `PqTelemetryEmitter` trait,
+  and `NoOp` / `InMemory` reference emitters.
 
 ## Supported ciphersuites
 

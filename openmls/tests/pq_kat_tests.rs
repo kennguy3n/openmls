@@ -279,3 +279,106 @@ mod xwing {
         eprintln!("xwing KATs: {n} vector(s) processed");
     }
 }
+
+// =============================================================================
+// Additional schema / negative-path / classical-rejection tests.
+// =============================================================================
+
+fn vectors_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("pq_kat_vectors")
+}
+
+fn load_named(file: &str) -> Vec<PqKatVector> {
+    let path = vectors_dir().join(file);
+    load_vectors(&path).unwrap_or_else(|e| panic!("load {file}: {e}"))
+}
+
+#[test]
+fn xwing_vectors_parse_and_hex_decode_cleanly() {
+    let vectors = load_named("xwing.json");
+    assert!(
+        !vectors.is_empty(),
+        "xwing.json must ship at least one synthetic vector — see Task 7"
+    );
+    for v in &vectors {
+        // Every shipped vector must reference a known ciphersuite.
+        let cs = v
+            .ciphersuite()
+            .unwrap_or_else(|e| panic!("vector {} has unknown ciphersuite: {e}", v.name));
+        assert_eq!(
+            cs,
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
+            "xwing.json vector {} must reference X-Wing",
+            v.name
+        );
+        // And every hex field must decode.
+        hex_decode("input_keying_material", &v.input_keying_material_hex)
+            .unwrap_or_else(|e| panic!("{}: ikm decode {e}", v.name));
+        hex_decode("expected_ciphertext", &v.expected_ciphertext_hex)
+            .unwrap_or_else(|e| panic!("{}: ct decode {e}", v.name));
+        hex_decode("expected_shared_secret", &v.expected_shared_secret_hex)
+            .unwrap_or_else(|e| panic!("{}: ss decode {e}", v.name));
+    }
+}
+
+#[test]
+fn json_schema_parses_for_every_vector_file() {
+    // All three vector files (xwing, ml_kem, ml_dsa) must parse — even
+    // when empty. This pins the parser's contract independently of
+    // whether real vectors have been dropped in yet.
+    for name in ["xwing.json", "ml_kem.json", "ml_dsa.json"] {
+        let path = vectors_dir().join(name);
+        let result = load_vectors(&path);
+        assert!(
+            result.is_ok(),
+            "schema parse failed for {name}: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn hex_decode_handles_empty_string() {
+    let out = hex_decode("test", "").expect("empty string is valid hex");
+    assert!(out.is_empty());
+}
+
+#[test]
+fn hex_decode_rejects_partial_byte_sequence() {
+    let err = hex_decode("test", "a").expect_err("single nibble must fail");
+    assert!(matches!(err, KatError::HexDecode { .. }));
+}
+
+#[test]
+fn hex_decode_rejects_invalid_chars_inline() {
+    // Mid-string non-hex char.
+    let err = hex_decode("test", "deadgg00").expect_err("mid-string non-hex");
+    assert!(matches!(err, KatError::HexDecode { .. }));
+}
+
+#[test]
+fn classical_provider_rejects_pq_kat_ciphersuite() {
+    use openmls_rust_crypto::RustCrypto;
+    use openmls_traits::crypto::OpenMlsCrypto;
+
+    let provider = RustCrypto::default();
+    let supported = provider.supported_ciphersuites();
+    let vectors = load_named("xwing.json");
+    assert!(
+        !vectors.is_empty(),
+        "xwing.json must ship at least one synthetic vector for the classical-rejection test"
+    );
+
+    for v in &vectors {
+        let cs = v.ciphersuite().expect("vector ciphersuite");
+        // The whole point of this test: the classical provider must
+        // not advertise the PQ ciphersuite.
+        assert!(
+            !supported.contains(&cs),
+            "RustCrypto unexpectedly advertises {cs:?} (vector {})",
+            v.name
+        );
+    }
+}

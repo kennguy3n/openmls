@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~30%**
+**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~55%**
 
 ## Version Targets
 
@@ -127,13 +127,22 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 #### Server components
 
-- [ ] KeyPackage service: per-ciphersuite and per-capability-version
-      storage/fetch.
-- [ ] Capability registry: signed per-device PQ capability.
+- [x] KeyPackage service: per-ciphersuite and per-capability-version
+      storage/fetch — in-memory reference impl in
+      `openmls/src/key_packages/key_package_service.rs`.
+- [x] Capability registry: signed per-device PQ capability — in-memory
+      reference impl in
+      `openmls/src/credentials/capability_registry.rs`.
 - [ ] Delivery service: APQ wrapper message support and commit ordering.
-- [ ] Group metadata service: conversation security state tracking.
-- [ ] Rate limiting for PQ KeyPackage fetches and Welcome fanout.
-- [ ] Telemetry for PQ-specific failure modes.
+- [x] Group metadata service: conversation security state tracking —
+      in-memory reference impl in
+      `openmls/src/group/conversation_metadata.rs`.
+- [x] Rate limiting for PQ KeyPackage fetches and Welcome fanout —
+      sliding-window limiter in
+      `openmls/src/key_packages/rate_limiter.rs`.
+- [x] Telemetry for PQ-specific failure modes — event enum, emitter
+      trait, and in-memory test emitter in
+      `openmls/src/group/pq_telemetry.rs`.
 
 #### Testing and validation
 
@@ -160,11 +169,49 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | ~~RustCrypto provider panics on X-Wing~~         | Fixed: RustCrypto returns `UnsupportedCiphersuite` instead of panicking |
 | No ML-DSA signature support in any provider      | PQ confidentiality ≠ PQ authenticity (enum + helpers landed; no provider impl) |
 | ~~No APQ-MLS combiner~~                          | Combiner scaffolding (FULL/PARTIAL commits, ApqInfo, bootstrap, ReInit, resync) is wired against `MlsGroup`; live multi-client soak tests still pending |
+| Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage |
+| `commit_reinit` seals the old group before `complete_reinit` can run | `commit_reinit` calls `set_inactive` after merging, and `export_secret` on an inactive group fails with `UseAfterEviction` — a future revision must derive the resumption PSK before sealing or expose an inactive-group exporter |
 | No migration state machine                       | Millions of users need per-device, per-conversation upgrade logic     |
 | No server-side capability protocol               | Required for staged rollout                                           |
 | No final IETF PQ ciphersuite codepoints          | Need versioning and migration from draft IDs                          |
 
 ## Changelog
+
+### 2026-05-04 (server stubs and end-to-end tests)
+
+- Added `openmls/src/credentials/capability_registry.rs` — in-memory
+  signed capability store keyed by `(user_id, device_id)`. Verifies
+  signatures on `store`, supports `fetch`, `fetch_all_for_user`, and
+  `remove`. 8 unit tests.
+- Added `openmls/src/key_packages/key_package_service.rs` — in-memory
+  KeyPackage server scaffold with one-time consumption and last-resort
+  fallback. Enforces `MAX_KEY_PACKAGES_PER_DEVICE`. 8 unit tests.
+- Added `openmls/src/group/conversation_metadata.rs` — metadata service
+  keyed by conversation ID. `update_security_state` and
+  `update_apq_info` go through `validate_mode_change` /
+  `validate_apq_info_change`. 9 unit tests.
+- Added `openmls/src/key_packages/rate_limiter.rs` — sliding-window
+  per-device rate limiter for PQ KeyPackage fetches. 7 unit tests.
+- Added `openmls/src/group/pq_telemetry.rs` — `PqTelemetryEvent` enum
+  (8 variants), `PqTelemetryEmitter` trait, `NoOpTelemetryEmitter`
+  (default) and `InMemoryTelemetryEmitter` (testing). 5 unit tests.
+- Populated `openmls/tests/pq_kat_vectors/xwing.json` with three
+  synthetic vectors and extended `openmls/tests/pq_kat_tests.rs` with
+  schema-parse, hex-decode, and classical-rejection tests (5 new
+  tests).
+- Added `openmls/tests/pq_apq_e2e_tests.rs` (11 tests) exercising
+  `bootstrap_apq` error paths, `PqPolicy::required_commit_type`
+  table, `detect_desync` on fresh conversations, and
+  `prepare_full_commit` rejection on non-APQ conversations.
+- Added `openmls/tests/pq_reinit_e2e_tests.rs` (8 tests) exercising
+  the ReInit flow: `propose_reinit` happy path / same-cs error,
+  `commit_reinit` transition-to-inactive, idempotent
+  `complete_reinit`, and a regression test pinning the current
+  commit-reinit-before-complete-reinit seal-order limitation.
+- Extended `openmls/tests/pq_lifecycle_tests.rs` with 8 real-MlsGroup
+  integration tests for `KChatMlsConversation` constructors and
+  accessors (using the RustCrypto provider with classical
+  ciphersuites).
 
 ### 2026-05-04 (orchestration wiring)
 

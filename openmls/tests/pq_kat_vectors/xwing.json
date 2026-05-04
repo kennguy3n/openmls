@@ -1,1 +1,23 @@
-[]
+[
+  {
+    "name": "synthetic xwing vector 1 (alpha)",
+    "ciphersuite": 77,
+    "input_keying_material_hex": "a648be1e9f0db017a0a4d65ec3733a7b68f453e24096c824f2b3bcee6330f77e",
+    "expected_ciphertext_hex": "74e650aef382253ee059d6f2e6d0eff88ef2b5cb967be0609854d988b96fcebdaaa3aceaa0b627d4511cf62a760e8dfa6f01e3244804b83e91701bea5b54262f",
+    "expected_shared_secret_hex": "e384ff22d007940df3820a03843c865b2f38805729636610730245a521ca2827"
+  },
+  {
+    "name": "synthetic xwing vector 2 (bravo)",
+    "ciphersuite": 77,
+    "input_keying_material_hex": "266b1fec10fe1c56e77845face51851c0c32d6bddc303fb432a134917c8af266",
+    "expected_ciphertext_hex": "77c463559c509516eb120d9676590e9d521a8669859c853bedfb1bd90aa7f12dc7099fc600c35acf8e3de6632f1b4128089f722e281bb39adc885a3031aaa049",
+    "expected_shared_secret_hex": "031484dedd16e895e343e60e7e88326ff4d98c0183dd0683f084ec0e72bca59a"
+  },
+  {
+    "name": "synthetic xwing vector 3 (charlie)",
+    "ciphersuite": 77,
+    "input_keying_material_hex": "35310dfd39e761976e8ff319cc01ba98dd7d16dc9cd4b5505e1c84b02888f0e6",
+    "expected_ciphertext_hex": "a87ecdbfcdbe08d4d64c327647b4400864eccec64c431e3f883d0656cb2d5833c41f0013fce402202c554d1f9b6c2aa4c24dbff57544d0ed1022d8d000113c11",
+    "expected_shared_secret_hex": "d7daa04cfc02c97cd72c87f5ed10248b4344381f91c4787359db4b94f9e76ba4"
+  }
+]
