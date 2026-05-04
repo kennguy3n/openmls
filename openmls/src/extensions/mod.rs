@@ -43,7 +43,10 @@ mod required_capabilities;
 use errors::*;
 
 // Public
+pub mod apq_info;
 pub mod errors;
+
+pub use apq_info::{ApqInfo, ApqInfoError};
 
 // Public re-exports
 #[cfg(feature = "extensions-draft-08")]

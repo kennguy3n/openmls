@@ -121,6 +121,7 @@ use errors::*;
 // Public
 pub mod errors;
 pub mod key_package_in;
+pub mod multi_ciphersuite;
 
 mod lifetime;
 
@@ -131,6 +132,9 @@ pub(crate) mod tests;
 // Public types
 pub use key_package_in::KeyPackageIn;
 pub use lifetime::Lifetime;
+pub use multi_ciphersuite::{
+    MultiCiphersuiteError, MultiCiphersuiteKeyPackages, MAX_KEY_PACKAGES_PER_DEVICE,
+};
 
 /// The unsigned payload of a key package.
 /// Any modification must happen on this unsigned struct. Use `sign` to get a
