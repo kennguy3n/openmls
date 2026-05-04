@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~55%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~70%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`
@@ -225,16 +225,27 @@ ciphersuite/capability each device speaks and how to fan out APQ traffic.
 |------------------------|-----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
 | KeyPackage service     | Store/fetch per ciphersuite and capability version, last-resort fallback                | `openmls/src/key_packages/key_package_service.rs` (`KeyPackageService`)        |
 | Capability registry    | Signed per-device PQ capability                                                         | `openmls/src/credentials/capability_registry.rs` (`CapabilityRegistry`)        |
-| Delivery service       | APQ wrapper messages, preserve commit ordering                                          | (out of scope for this repo — lives in the KChat server)                      |
+| Delivery service       | APQ wrapper messages, preserve commit ordering                                          | `openmls/src/messages/delivery_service.rs` (`DeliveryService`, `ApqDeliveryEnvelope`) — in-memory reference impl, PQ‑before‑T FULL‑pair ordering enforced |
 | Group metadata         | Track conversation security state (not secrets), enforce no-downgrade                   | `openmls/src/group/conversation_metadata.rs` (`ConversationMetadataService`)   |
 | Abuse/rate limit       | Rate-limit PQ KeyPackage fetches and Welcome fanout                                     | `openmls/src/key_packages/rate_limiter.rs` (`KeyPackageFetchRateLimiter`)      |
 | Telemetry              | Track failures, unsupported suites, rejections, exhaustion (no plaintext)               | `openmls/src/group/pq_telemetry.rs` (`PqTelemetryEvent`, `PqTelemetryEmitter`) |
 
-All five reference implementations are **in-memory**. They define the
+All six reference implementations are **in-memory**. They define the
 API contract a production server is expected to honour and let tests
 drive end-to-end flows without standing up a real backend; production
 servers must back them with persistent storage and the appropriate
 authentication / authorization shim.
+
+**Migration state machine.** Independent of the per-component
+reference impls above, every conversation upgrade is tracked by
+[`openmls/src/group/migration_state.rs`](./openmls/src/group/migration_state.rs)
+(`MigrationStateMachine`). The state machine has eight states
+(`NotStarted` → `CapabilitiesCollected` → `KeyPackagesPublished` →
+`ModeSelected` → `BootstrapInitiated` → `BootstrapComplete` →
+`FirstFullCommitDone` → `Operational` | `Failed`); `Failed` is
+reachable from any non-terminal state. Servers and clients use it to
+reason about progress without pattern-matching on `KChatMlsConversation`
+internals.
 
 ## Rollout Gates
 

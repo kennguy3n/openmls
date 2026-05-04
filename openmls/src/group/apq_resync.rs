@@ -220,6 +220,8 @@ where
         return Err(ApqResyncError::NoTSession);
     }
 
+    conversation.emit_resync_triggered("resync_from_pq");
+
     let conversation_id = conversation.conversation_id().to_vec();
 
     // 1. Process the missed PQ commit ----------------------------------------
@@ -301,6 +303,8 @@ where
         return Err(ApqResyncError::NoTSession);
     }
 
+    conversation.emit_resync_triggered("resync_from_t");
+
     let protocol_msg: ProtocolMessage = ProtocolMessage::try_from(missed_t_commit)
         .map_err(|e| ApqResyncError::TProcessingFailed(format!("{e:?}")))?;
     let processed = {
@@ -360,6 +364,8 @@ where
     if !conversation.is_apq() {
         return Err(ApqResyncError::NotApqConversation);
     }
+
+    conversation.emit_resync_triggered("force_resync");
 
     // Clear any stale in-flight flag — a force resync is the moral
     // equivalent of "I don't trust the previous handshake; start a new

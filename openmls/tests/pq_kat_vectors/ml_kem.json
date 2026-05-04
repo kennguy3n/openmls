@@ -1,1 +1,23 @@
-[]
+[
+  {
+    "name": "synthetic ml-kem-768+x25519 hybrid vector 1 (alpha)",
+    "ciphersuite": 65025,
+    "input_keying_material_hex": "5ca1ab1edeadbeefcafebabef00dd00d12345678abcdef00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+    "expected_ciphertext_hex": "fe01feedfacef00dcafebabe12345678abcdef0011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff0011223344556677",
+    "expected_shared_secret_hex": "fe017878787878787878787878787878fe017878787878787878787878787878"
+  },
+  {
+    "name": "synthetic ml-kem-768+x25519 hybrid vector 2 (chacha)",
+    "ciphersuite": 65026,
+    "input_keying_material_hex": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "expected_ciphertext_hex": "fe02fedcba9876543210fedcba9876543210abcdef0123456789abcdef0123456789",
+    "expected_shared_secret_hex": "fe029999999999999999999999999999ff9999999999999999999999999999fe"
+  },
+  {
+    "name": "synthetic ml-kem-1024 vector 3 (pure)",
+    "ciphersuite": 65027,
+    "input_keying_material_hex": "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff",
+    "expected_ciphertext_hex": "fe03000011112222333344445555666677778888999900001111222233334444aaaabbbbccccddddeeeeffff",
+    "expected_shared_secret_hex": "fe03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabfe03aaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]

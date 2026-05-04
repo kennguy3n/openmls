@@ -26,6 +26,7 @@ pub mod apq_resync;
 pub mod conversation_metadata;
 pub mod conversation_upgrade;
 pub mod kchat_conversation;
+pub mod migration_state;
 pub mod no_downgrade;
 pub mod pq_policy;
 pub mod pq_telemetry;
@@ -55,19 +56,24 @@ pub use apq_resync::{
     DesyncStatus, ResyncResult, MAX_EPOCH_DRIFT,
 };
 pub use conversation_metadata::{ConversationMetadata, ConversationMetadataService, MetadataError};
-pub use conversation_upgrade::{select_conversation_mode, ConversationUpgradeError};
+pub use conversation_upgrade::{
+    select_conversation_mode, select_conversation_mode_with_emitter, ConversationUpgradeError,
+};
 pub use kchat_conversation::{ApqBootstrapError, KChatConversationError, KChatMlsConversation};
+pub use migration_state::{MigrationError, MigrationEvent, MigrationState, MigrationStateMachine};
 pub use no_downgrade::{
     validate_apq_info_change, validate_ciphersuite_pin, validate_epoch_consistency,
-    validate_joiner_key_package, validate_mode_change, ConversationSecurityState, DowngradeError,
+    validate_joiner_key_package, validate_mode_change, validate_mode_change_with_emitter,
+    ConversationSecurityState, DowngradeError,
 };
 pub use pq_policy::{CommitTrigger, CommitType, PqPolicy};
 pub use pq_telemetry::{
     InMemoryTelemetryEmitter, NoOpTelemetryEmitter, PqTelemetryEmitter, PqTelemetryEvent,
 };
 pub use reinit_upgrade::{
-    commit_reinit, complete_reinit, propose_reinit, ReInitCommit, ReInitError, ReInitPlan,
-    ReInitResumption,
+    commit_reinit, complete_reinit, complete_reinit_from_commit,
+    complete_reinit_from_commit_with_emitter, propose_reinit, ReInitCommit, ReInitError,
+    ReInitPlan, ReInitResumption,
 };
 
 // Private

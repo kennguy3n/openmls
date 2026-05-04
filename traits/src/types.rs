@@ -261,6 +261,21 @@ pub enum HpkeKemType {
     /// interop with future deployments requires migrating to that final
     /// value.
     XWingKemDraft6 = 0x004D,
+
+    /// **DRAFT** — Hybrid combiner for ML-KEM-768 and X25519.
+    ///
+    /// Codepoint `0xFE01` is a private-use draft value tracking the IETF
+    /// MLS PQ ciphersuite draft (March 2026). It will be reassigned to a
+    /// final IANA codepoint once the draft is published.
+    MlKem768X25519Draft = 0xFE01,
+
+    /// **DRAFT** — Pure ML-KEM-1024 (no classical hybridization).
+    ///
+    /// Codepoint `0xFE03` is a private-use draft value tracking the IETF
+    /// MLS PQ ciphersuite draft (March 2026). Pure-PQ KEM ciphersuites
+    /// are intended for high-risk deployments that prefer to drop the
+    /// classical KEM rather than hybridize.
+    MlKem1024Draft = 0xFE03,
 }
 
 impl HpkeKemType {
@@ -271,7 +286,12 @@ impl HpkeKemType {
     /// assigns them; deployments that treat a draft codepoint as final risk
     /// silent interop / downgrade failures.
     pub const fn is_draft_codepoint(&self) -> bool {
-        matches!(self, HpkeKemType::XWingKemDraft6)
+        matches!(
+            self,
+            HpkeKemType::XWingKemDraft6
+                | HpkeKemType::MlKem768X25519Draft
+                | HpkeKemType::MlKem1024Draft
+        )
     }
 }
 
@@ -494,6 +514,33 @@ pub enum Ciphersuite {
     /// interop with future deployments requires migrating to that final
     /// value.
     MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 = 0x004D,
+
+    /// **DRAFT** — Hybrid ML-KEM-768 + X25519 | AES-GCM 256 | SHA2-384 | Ed25519.
+    ///
+    /// Tracks the IETF MLS PQ ciphersuite draft (March 2026). Codepoint
+    /// `0xFE01` is a private-use value and **will change** when IANA
+    /// assigns the final codepoint. The PQ KEM is hybridized with X25519;
+    /// signatures remain classical (Ed25519), so the security mode
+    /// implied by this suite is
+    /// [`SecurityMode::PqConfidentiality`].
+    MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519 = 0xFE01,
+
+    /// **DRAFT** — Hybrid ML-KEM-768 + X25519 | Chacha20Poly1305 | SHA2-256 | Ed25519.
+    ///
+    /// Tracks the IETF MLS PQ ciphersuite draft (March 2026). Codepoint
+    /// `0xFE02` is a private-use value and **will change** when IANA
+    /// assigns the final codepoint. Same KEM/signature shape as the
+    /// `0xFE01` variant; differs only in the AEAD/hash combination.
+    MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 = 0xFE02,
+
+    /// **DRAFT** — Pure ML-KEM-1024 | AES-GCM 256 | SHA2-512 | Ed448.
+    ///
+    /// Tracks the IETF MLS PQ ciphersuite draft (March 2026). Codepoint
+    /// `0xFE03` is a private-use value and **will change** when IANA
+    /// assigns the final codepoint. Pure-PQ KEM (no classical
+    /// hybridization); signatures are classical Ed448, so the security
+    /// mode is [`SecurityMode::PqConfidentiality`].
+    MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 = 0xFE03,
 }
 
 impl Ciphersuite {
@@ -502,14 +549,14 @@ impl Ciphersuite {
     ///
     /// Draft codepoints MUST be migrated to their final values once IANA
     /// assigns them; deployments that treat a draft codepoint as final risk
-    /// silent interop / downgrade failures. Currently this only applies to
-    /// the X-Wing draft suite, but additional draft suites (ML-KEM hybrid,
-    /// pure ML-KEM, ML-DSA-bearing) will land here as the IETF MLS PQ
-    /// ciphersuite draft progresses.
+    /// silent interop / downgrade failures.
     pub const fn is_draft_codepoint(&self) -> bool {
         matches!(
             self,
             Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+                | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
+                | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519
+                | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448
         )
     }
 }
@@ -548,6 +595,9 @@ impl TryFrom<u16> for Ciphersuite {
             0x0006 => Ok(Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448),
             0x0007 => Ok(Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384),
             0x004D => Ok(Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519),
+            0xFE01 => Ok(Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519),
+            0xFE02 => Ok(Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519),
+            0xFE03 => Ok(Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448),
             _ => Err(Self::Error::DecodingError(format!(
                 "{v} is not a valid ciphersuite value"
             ))),
@@ -605,11 +655,16 @@ impl Ciphersuite {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
             | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256
             | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
-            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => HashType::Sha2_256,
-            Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384 => HashType::Sha2_384,
+            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 => {
+                HashType::Sha2_256
+            }
+            Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519 => HashType::Sha2_384,
             Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
             | Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521
-            | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448 => HashType::Sha2_512,
+            | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448
+            | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 => HashType::Sha2_512,
         }
     }
 
@@ -619,7 +674,9 @@ impl Ciphersuite {
         match self {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
             | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
-            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => {
+            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 => {
                 SignatureScheme::ED25519
             }
             Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256 => {
@@ -629,9 +686,8 @@ impl Ciphersuite {
                 SignatureScheme::ECDSA_SECP521R1_SHA512
             }
             Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
-            | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448 => {
-                SignatureScheme::ED448
-            }
+            | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448
+            | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 => SignatureScheme::ED448,
             Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384 => {
                 SignatureScheme::ECDSA_SECP384R1_SHA384
             }
@@ -646,12 +702,15 @@ impl Ciphersuite {
             | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256 => AeadType::Aes128Gcm,
             Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
             | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448
-            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => {
+            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 => {
                 AeadType::ChaCha20Poly1305
             }
             Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
             | Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521
-            | Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384 => AeadType::Aes256Gcm,
+            | Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
+            | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 => AeadType::Aes256Gcm,
         }
     }
 
@@ -662,13 +721,18 @@ impl Ciphersuite {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
             | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256
             | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
-            | Self::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => HpkeKdfType::HkdfSha256,
-            Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384 => HpkeKdfType::HkdfSha384,
+            | Self::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 => {
+                HpkeKdfType::HkdfSha256
+            }
+            Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519 => {
+                HpkeKdfType::HkdfSha384
+            }
             Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
             | Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521
-            | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448 => {
-                HpkeKdfType::HkdfSha512
-            }
+            | Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448
+            | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 => HpkeKdfType::HkdfSha512,
         }
     }
 
@@ -688,6 +752,11 @@ impl Ciphersuite {
             Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => {
                 HpkeKemType::XWingKemDraft6
             }
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 => {
+                HpkeKemType::MlKem768X25519Draft
+            }
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 => HpkeKemType::MlKem1024Draft,
         }
     }
 
@@ -698,12 +767,15 @@ impl Ciphersuite {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
             | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256 => HpkeAeadType::AesGcm128,
             Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
-            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => {
+            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 => {
                 HpkeAeadType::ChaCha20Poly1305
             }
             Ciphersuite::MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448
             | Ciphersuite::MLS_256_DHKEMP384_AES256GCM_SHA384_P384
-            | Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521 => HpkeAeadType::AesGcm256,
+            | Ciphersuite::MLS_256_DHKEMP521_AES256GCM_SHA512_P521
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
+            | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 => HpkeAeadType::AesGcm256,
             Ciphersuite::MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448 => {
                 HpkeAeadType::ChaCha20Poly1305
             }
@@ -877,5 +949,94 @@ mod tests {
                 "Classical signature scheme {scheme:?} must not be post-quantum"
             );
         }
+    }
+
+    // ------- IETF MLS PQ ML-KEM draft ciphersuites -------
+
+    fn ml_kem_draft_ciphersuites() -> [Ciphersuite; 3] {
+        [
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519,
+            Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519,
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448,
+        ]
+    }
+
+    #[test]
+    fn ml_kem_ciphersuite_codepoints_are_in_private_use_range() {
+        // Codepoints must live in the private-use 0xFE00–0xFEFF range so
+        // they can't collide with anything IANA assigns.
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519 as u16,
+            0xFE01
+        );
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519 as u16,
+            0xFE02
+        );
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448 as u16,
+            0xFE03
+        );
+    }
+
+    #[test]
+    fn ml_kem_ciphersuites_report_as_draft() {
+        for cs in ml_kem_draft_ciphersuites() {
+            assert!(
+                cs.is_draft_codepoint(),
+                "ML-KEM draft ciphersuite {cs:?} must report as a draft codepoint"
+            );
+        }
+    }
+
+    #[test]
+    fn ml_kem_ciphersuites_round_trip_via_try_from_u16() {
+        for cs in ml_kem_draft_ciphersuites() {
+            let raw: u16 = cs.into();
+            let back = Ciphersuite::try_from(raw).expect("round-trip");
+            assert_eq!(back, cs, "round-trip failed for {cs:?}");
+        }
+    }
+
+    #[test]
+    fn ml_kem_ciphersuites_have_expected_signature_schemes() {
+        // Hybrid ML-KEM-768+X25519 stays on Ed25519. Pure ML-KEM-1024
+        // is paired with Ed448.
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519.signature_algorithm(),
+            SignatureScheme::ED25519
+        );
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519
+                .signature_algorithm(),
+            SignatureScheme::ED25519
+        );
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448.signature_algorithm(),
+            SignatureScheme::ED448
+        );
+    }
+
+    #[test]
+    fn ml_kem_kem_types_are_draft() {
+        assert!(HpkeKemType::MlKem768X25519Draft.is_draft_codepoint());
+        assert!(HpkeKemType::MlKem1024Draft.is_draft_codepoint());
+    }
+
+    #[test]
+    fn ml_kem_ciphersuites_map_to_pq_kem_types() {
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519.hpke_kem_algorithm(),
+            HpkeKemType::MlKem768X25519Draft
+        );
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519
+                .hpke_kem_algorithm(),
+            HpkeKemType::MlKem768X25519Draft
+        );
+        assert_eq!(
+            Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448.hpke_kem_algorithm(),
+            HpkeKemType::MlKem1024Draft
+        );
     }
 }

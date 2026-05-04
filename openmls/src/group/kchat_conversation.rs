@@ -17,6 +17,8 @@
 //! [`crate::group::apq_commit`](super::apq_commit), and the policy decisions
 //! live in [`crate::group::pq_policy`](super::pq_policy).
 
+use std::sync::Arc;
+
 use openmls_traits::random::OpenMlsRand;
 use openmls_traits::signatures::Signer;
 use openmls_traits::types::Ciphersuite;
@@ -27,6 +29,7 @@ use crate::framing::{MlsMessageBodyOut, MlsMessageOut};
 use crate::group::apq_commit::{APQ_PSK_ID_LENGTH, APQ_PSK_LABEL, APQ_PSK_LENGTH};
 use crate::group::mls_group::MlsGroup;
 use crate::group::pq_policy::PqPolicy;
+use crate::group::pq_telemetry::{NoOpTelemetryEmitter, PqTelemetryEmitter};
 use crate::key_packages::KeyPackage;
 use crate::messages::apq_welcome::{ApqWelcome, ApqWelcomeError};
 use crate::messages::Welcome;
@@ -47,7 +50,6 @@ use crate::storage::OpenMlsProvider;
 ///
 /// To distinguish DIRECT_PQ from APQ at runtime, callers consult
 /// [`Self::is_apq`].
-#[derive(Debug)]
 pub struct KChatMlsConversation {
     conversation_id: Vec<u8>,
     mode: SecurityMode,
@@ -57,6 +59,25 @@ pub struct KChatMlsConversation {
     pending_full_commit: bool,
     last_full_commit_epoch: u64,
     pq_policy: PqPolicy,
+    /// PQ telemetry sink. Defaults to [`NoOpTelemetryEmitter`].
+    /// Replace with [`Self::set_telemetry_emitter`] when wiring an
+    /// observability backend.
+    telemetry: Arc<dyn PqTelemetryEmitter>,
+}
+
+impl std::fmt::Debug for KChatMlsConversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KChatMlsConversation")
+            .field("conversation_id", &self.conversation_id)
+            .field("mode", &self.mode)
+            .field("t_group", &self.t_group)
+            .field("pq_group", &self.pq_group)
+            .field("apq_info", &self.apq_info)
+            .field("pending_full_commit", &self.pending_full_commit)
+            .field("last_full_commit_epoch", &self.last_full_commit_epoch)
+            .field("pq_policy", &self.pq_policy)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Errors returned by [`KChatMlsConversation`] constructors.
@@ -107,6 +128,7 @@ impl KChatMlsConversation {
             pending_full_commit: false,
             last_full_commit_epoch: 0,
             pq_policy: PqPolicy::Classical,
+            telemetry: Arc::new(NoOpTelemetryEmitter),
         })
     }
 
@@ -134,6 +156,7 @@ impl KChatMlsConversation {
             pending_full_commit: false,
             last_full_commit_epoch: 0,
             pq_policy: policy,
+            telemetry: Arc::new(NoOpTelemetryEmitter),
         })
     }
 
@@ -169,7 +192,23 @@ impl KChatMlsConversation {
             pending_full_commit: false,
             last_full_commit_epoch: 0,
             pq_policy: policy,
+            telemetry: Arc::new(NoOpTelemetryEmitter),
         })
+    }
+
+    /// Replace the [`PqTelemetryEmitter`] this conversation routes
+    /// PQ-specific events through. The default is
+    /// [`NoOpTelemetryEmitter`]; pass an
+    /// [`crate::group::pq_telemetry::InMemoryTelemetryEmitter`] in tests
+    /// or a real exporter (e.g. an OTel sink) in production.
+    pub fn set_telemetry_emitter(&mut self, emitter: Arc<dyn PqTelemetryEmitter>) {
+        self.telemetry = emitter;
+    }
+
+    /// Reference to the conversation's currently-installed
+    /// [`PqTelemetryEmitter`].
+    pub fn telemetry_emitter(&self) -> &Arc<dyn PqTelemetryEmitter> {
+        &self.telemetry
     }
 
     /// The opaque application-level conversation identifier (KChat
@@ -349,10 +388,16 @@ impl KChatMlsConversation {
         // --- 1. Add peers to PQ session, merge commit -----------------------
         let (_pq_commit, pq_welcome_msg, _pq_group_info) = pq_group
             .add_members(provider, signer, &pq_key_packages)
-            .map_err(|e| ApqBootstrapError::AddMembersFailed(format!("{e}")))?;
-        pq_group
-            .merge_pending_commit(provider)
-            .map_err(|e| ApqBootstrapError::MergeFailed(format!("{e}")))?;
+            .map_err(|e| {
+                let msg = format!("{e}");
+                self.emit_pq_provider_error("add_members", &msg);
+                ApqBootstrapError::AddMembersFailed(msg)
+            })?;
+        pq_group.merge_pending_commit(provider).map_err(|e| {
+            let msg = format!("{e}");
+            self.emit_pq_provider_error("merge_pending_commit", &msg);
+            ApqBootstrapError::MergeFailed(msg)
+        })?;
 
         let pq_welcome = welcome_from_message(pq_welcome_msg)?;
 
@@ -364,7 +409,11 @@ impl KChatMlsConversation {
                 &self.conversation_id,
                 APQ_PSK_LENGTH,
             )
-            .map_err(|e| ApqBootstrapError::ExportSecretFailed(format!("{e}")))?;
+            .map_err(|e| {
+                let msg = format!("{e}");
+                self.emit_pq_provider_error("export_secret", &msg);
+                ApqBootstrapError::ExportSecretFailed(msg)
+            })?;
 
         let psk_id_bytes = provider
             .rand()
@@ -427,7 +476,100 @@ impl KChatMlsConversation {
         self.apq_info = Some(apq_info);
         self.pq_policy = apq_policy;
 
+        // --- 6. Emit telemetry ----------------------------------------------
+        let member_count = self
+            .pq_group
+            .as_ref()
+            .expect("pq_group installed above")
+            .members()
+            .count();
+        self.telemetry.emit(
+            crate::group::pq_telemetry::PqTelemetryEvent::ApqBootstrapCompleted {
+                conversation_id: self.conversation_id.clone(),
+                mode: apq_mode,
+                member_count,
+            },
+        );
+
         Ok(apq_welcome)
+    }
+
+    /// Internal helper: emit a [`MissedCommitPair`] event.
+    ///
+    /// [`MissedCommitPair`]:
+    ///     crate::group::pq_telemetry::PqTelemetryEvent::MissedCommitPair
+    #[allow(dead_code)]
+    pub(crate) fn emit_missed_commit_pair(&self, missed_side: &str, t_epoch: u64, pq_epoch: u64) {
+        self.telemetry.emit(
+            crate::group::pq_telemetry::PqTelemetryEvent::MissedCommitPair {
+                conversation_id: self.conversation_id.clone(),
+                missed_side: missed_side.to_string(),
+                t_epoch,
+                pq_epoch,
+            },
+        );
+    }
+
+    /// Internal helper: emit a [`PqProviderError`] event for an opaque
+    /// PQ provider failure.
+    ///
+    /// [`PqProviderError`]:
+    ///     crate::group::pq_telemetry::PqTelemetryEvent::PqProviderError
+    pub(crate) fn emit_pq_provider_error(&self, operation: &str, error: &str) {
+        self.telemetry.emit(
+            crate::group::pq_telemetry::PqTelemetryEvent::PqProviderError {
+                operation: operation.to_string(),
+                error: error.to_string(),
+            },
+        );
+    }
+
+    /// Internal helper: emit a [`ResyncTriggered`] event with the
+    /// supplied free-form `status` describing the resync flavour.
+    ///
+    /// [`ResyncTriggered`]:
+    ///     crate::group::pq_telemetry::PqTelemetryEvent::ResyncTriggered
+    pub(crate) fn emit_resync_triggered(&self, status: &str) {
+        self.telemetry.emit(
+            crate::group::pq_telemetry::PqTelemetryEvent::ResyncTriggered {
+                conversation_id: self.conversation_id.clone(),
+                status: status.to_string(),
+            },
+        );
+    }
+
+    /// Internal helper: emit a [`DowngradeAttempt`] event.
+    ///
+    /// [`DowngradeAttempt`]:
+    ///     crate::group::pq_telemetry::PqTelemetryEvent::DowngradeAttempt
+    #[allow(dead_code)]
+    pub(crate) fn emit_downgrade_attempt(&self, from: SecurityMode, to: SecurityMode) {
+        self.telemetry.emit(
+            crate::group::pq_telemetry::PqTelemetryEvent::DowngradeAttempt {
+                conversation_id: self.conversation_id.clone(),
+                from,
+                to,
+            },
+        );
+    }
+
+    /// Internal helper: emit a [`ReInitCompleted`] event.
+    ///
+    /// [`ReInitCompleted`]:
+    ///     crate::group::pq_telemetry::PqTelemetryEvent::ReInitCompleted
+    #[allow(dead_code)]
+    pub(crate) fn emit_reinit_completed(
+        &self,
+        old_ciphersuite: Ciphersuite,
+        new_ciphersuite: Ciphersuite,
+    ) {
+        self.telemetry.emit(
+            crate::group::pq_telemetry::PqTelemetryEvent::ReInitCompleted {
+                conversation_id: self.conversation_id.clone(),
+                old_ciphersuite,
+                new_ciphersuite,
+            },
+        );
     }
 }
 

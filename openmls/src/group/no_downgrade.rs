@@ -194,6 +194,49 @@ pub fn validate_mode_change(
     Ok(())
 }
 
+/// Telemetry-aware variant of [`validate_mode_change`].
+///
+/// Behaves identically, but emits a
+/// [`PqTelemetryEvent::DowngradeAttempt`] event whenever the
+/// transition is rejected with [`DowngradeError::ModeDowngrade`],
+/// [`DowngradeError::BelowHighestEver`], or
+/// [`DowngradeError::BelowPolicyFloor`]. The event is emitted *before*
+/// the error is returned so callers can keep their existing
+/// `?`-propagation patterns.
+///
+/// `conversation_id` is the application-level conversation identifier
+/// the orchestration layer assigned to this conversation; it is used
+/// only to populate the telemetry event.
+///
+/// [`PqTelemetryEvent::DowngradeAttempt`]:
+///     crate::group::pq_telemetry::PqTelemetryEvent::DowngradeAttempt
+pub fn validate_mode_change_with_emitter(
+    state: &ConversationSecurityState,
+    to: SecurityMode,
+    emitter: &dyn crate::group::pq_telemetry::PqTelemetryEmitter,
+    conversation_id: &[u8],
+) -> Result<(), DowngradeError> {
+    let result = validate_mode_change(state, to);
+    if let Err(ref e) = result {
+        let from = match e {
+            DowngradeError::ModeDowngrade { from, .. } => Some(*from),
+            DowngradeError::BelowHighestEver { highest, .. } => Some(*highest),
+            DowngradeError::BelowPolicyFloor { floor, .. } => Some(*floor),
+            _ => None,
+        };
+        if let Some(from) = from {
+            emitter.emit(
+                crate::group::pq_telemetry::PqTelemetryEvent::DowngradeAttempt {
+                    conversation_id: conversation_id.to_vec(),
+                    from,
+                    to,
+                },
+            );
+        }
+    }
+    result
+}
+
 /// Validate that a joiner's KeyPackage is acceptable for `mode`.
 ///
 /// Concretely: a `PqAuthenticity` or `PqConfidentiality` (i.e. PQ-required)

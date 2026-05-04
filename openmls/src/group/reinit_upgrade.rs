@@ -149,6 +149,24 @@ pub struct ReInitCommit {
     /// is no Welcome (no new joiners), but the field is reserved here for
     /// completeness.
     pub welcome: Option<MlsMessageOut>,
+    /// Resumption PSK secret derived from the old group **before** the
+    /// `set_inactive` seal step in [`commit_reinit`]. Stored here so the
+    /// orchestration layer can call [`complete_reinit_from_commit`] on
+    /// the now-inactive group without hitting `UseAfterEviction` from
+    /// the exporter.
+    pub resumption_psk_secret: Option<Vec<u8>>,
+    /// Group ID of the old (now read-only) group, captured at commit
+    /// time so [`complete_reinit_from_commit`] does not need to call
+    /// accessors on the inactive group.
+    pub old_group_id: GroupId,
+    /// Final epoch of the old group at ReInit time, captured at commit
+    /// time for the same reason as [`Self::old_group_id`].
+    pub old_group_epoch: GroupEpoch,
+    /// Ciphersuite the old group ran under, captured at commit time.
+    pub old_ciphersuite: Ciphersuite,
+    /// Ciphersuite the new (post-ReInit) group will run under, captured
+    /// from [`ReInitPlan::new_ciphersuite`] at commit time.
+    pub new_ciphersuite: Ciphersuite,
 }
 
 /// Result of [`complete_reinit`].
@@ -238,6 +256,26 @@ where
         .merge_pending_commit(provider)
         .map_err(|e| ReInitError::MergeFailed(format!("{e}")))?;
 
+    // Derive the resumption PSK *before* sealing the old group: the
+    // exporter is not callable on an inactive group (returns
+    // `UseAfterEviction`), so the orchestration layer would otherwise
+    // be unable to produce the PSK ID once `set_inactive` runs. We
+    // also capture the old group's identity here so
+    // `complete_reinit_from_commit` can finish the work without
+    // touching the now-inactive group.
+    let conversation_id_bytes = old_group.group_id().as_slice().to_vec();
+    let resumption_psk_secret = old_group
+        .export_secret(
+            provider.crypto(),
+            REINIT_PSK_LABEL,
+            &conversation_id_bytes,
+            REINIT_PSK_LENGTH,
+        )
+        .map_err(|e| ReInitError::ExportSecretFailed(format!("{e}")))?;
+    let old_group_id = old_group.group_id().clone();
+    let old_group_epoch = old_group.epoch();
+    let old_ciphersuite = old_group.ciphersuite();
+
     // Upstream OpenMLS only auto-transitions to `Inactive` on self-removal
     // (`processing.rs::merge_staged_commit` checks `staged_commit.self_removed()`).
     // ReInit is not self-removal, so we must explicitly seal the old group
@@ -253,6 +291,11 @@ where
     Ok(ReInitCommit {
         commit: commit_msg,
         welcome: None,
+        resumption_psk_secret: Some(resumption_psk_secret),
+        old_group_id,
+        old_group_epoch,
+        old_ciphersuite,
+        new_ciphersuite: plan.new_ciphersuite,
     })
 }
 
@@ -301,6 +344,103 @@ where
         old_group_epoch: old_group.epoch(),
         old_ciphersuite: old_group.ciphersuite(),
     })
+}
+
+/// Finalize the ReInit upgrade using the resumption PSK pre-derived by
+/// [`commit_reinit`].
+///
+/// Unlike [`complete_reinit`], this variant does **not** call
+/// [`MlsGroup::export_secret`] — it consumes the PSK material captured
+/// in [`ReInitCommit::resumption_psk_secret`] before the seal step. This
+/// is the path the orchestration layer should use after `commit_reinit`
+/// has run, since the old group is then `Inactive` and its exporter
+/// would return `UseAfterEviction`.
+///
+/// The PSK is wrapped in a fresh `Resumption(ReInit)` [`PreSharedKeyId`]
+/// (with a random nonce) and persisted to the provider, exactly like
+/// [`complete_reinit`] does.
+pub fn complete_reinit_from_commit<P>(
+    commit: &ReInitCommit,
+    provider: &P,
+) -> Result<ReInitResumption, ReInitError>
+where
+    P: OpenMlsProvider,
+{
+    let psk_secret = commit.resumption_psk_secret.as_ref().ok_or_else(|| {
+        ReInitError::ExportSecretFailed(
+            "ReInitCommit has no pre-derived resumption_psk_secret".into(),
+        )
+    })?;
+
+    let psk_nonce = provider
+        .rand()
+        .random_vec(REINIT_PSK_NONCE_LENGTH)
+        .map_err(|e| ReInitError::RandomGenerationFailed(format!("psk_nonce: {e}")))?;
+
+    let resumption_psk_id = PreSharedKeyId::resumption(
+        ResumptionPskUsage::Reinit,
+        commit.old_group_id.clone(),
+        commit.old_group_epoch,
+        psk_nonce,
+    );
+
+    resumption_psk_id
+        .store(provider, psk_secret)
+        .map_err(|e| ReInitError::PskStoreFailed(format!("{e}")))?;
+
+    Ok(ReInitResumption {
+        resumption_psk_id,
+        old_group_id: commit.old_group_id.clone(),
+        old_group_epoch: commit.old_group_epoch,
+        old_ciphersuite: commit.old_ciphersuite,
+    })
+}
+
+/// Telemetry-aware variant of [`complete_reinit_from_commit`].
+///
+/// Identical behaviour, but emits a
+/// [`PqTelemetryEvent::ReInitCompleted`] event on success and a
+/// [`PqTelemetryEvent::PqProviderError`] event on failure (with
+/// `operation = "complete_reinit_from_commit"`).
+///
+/// `conversation_id` is the application-level conversation identifier
+/// the orchestration layer assigned to this conversation; it is used
+/// only to populate the telemetry event.
+///
+/// [`PqTelemetryEvent::ReInitCompleted`]:
+///     crate::group::pq_telemetry::PqTelemetryEvent::ReInitCompleted
+/// [`PqTelemetryEvent::PqProviderError`]:
+///     crate::group::pq_telemetry::PqTelemetryEvent::PqProviderError
+pub fn complete_reinit_from_commit_with_emitter<P>(
+    commit: &ReInitCommit,
+    provider: &P,
+    emitter: &dyn crate::group::pq_telemetry::PqTelemetryEmitter,
+    conversation_id: &[u8],
+) -> Result<ReInitResumption, ReInitError>
+where
+    P: OpenMlsProvider,
+{
+    match complete_reinit_from_commit(commit, provider) {
+        Ok(resumption) => {
+            emitter.emit(
+                crate::group::pq_telemetry::PqTelemetryEvent::ReInitCompleted {
+                    conversation_id: conversation_id.to_vec(),
+                    old_ciphersuite: resumption.old_ciphersuite,
+                    new_ciphersuite: commit.new_ciphersuite,
+                },
+            );
+            Ok(resumption)
+        }
+        Err(e) => {
+            emitter.emit(
+                crate::group::pq_telemetry::PqTelemetryEvent::PqProviderError {
+                    operation: "complete_reinit_from_commit".into(),
+                    error: format!("{e:?}"),
+                },
+            );
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

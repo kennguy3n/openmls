@@ -61,8 +61,11 @@ fn kem_mode(kem: HpkeKemType) -> Result<hpke_types::KemAlgorithm, CryptoError> {
         // The RustCrypto provider intentionally does not implement any
         // post-quantum KEM. Returning `UnsupportedCiphersuite` here keeps a
         // misconfiguration from crashing the process — a callable signal to
-        // the caller that this provider cannot speak X-Wing.
-        HpkeKemType::XWingKemDraft6 => Err(CryptoError::UnsupportedCiphersuite),
+        // the caller that this provider cannot speak X-Wing or any of the
+        // ML-KEM draft suites.
+        HpkeKemType::XWingKemDraft6
+        | HpkeKemType::MlKem768X25519Draft
+        | HpkeKemType::MlKem1024Draft => Err(CryptoError::UnsupportedCiphersuite),
     }
 }
 
