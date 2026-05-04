@@ -20,25 +20,29 @@ pub use openmls::prelude::{
     ApqCommitPair, ApqDeliveryOrder, ApqMessage, ApqOrderingError, SessionSide,
 };
 
-use crate::messages::AuthToken;
-
 /// Client → DS: enqueue a single [`ApqMessage`] for fan-out.
+///
+/// The publish-side wire types deliberately do **not** carry an
+/// `auth_token`. The reference DS is the same posture as the existing
+/// `POST /send/message` endpoint: it does not authenticate senders.
+/// Carrying a token field here would imply a server-side check that
+/// doesn't exist; production deployments are expected to wrap the DS
+/// in their own authenticated transport.
 #[derive(Debug, Clone, TlsSize, TlsSerialize, TlsDeserialize)]
 pub struct PublishApqMessageRequest {
     /// Wire envelope.
     pub message: ApqMessage,
-    /// Caller's auth token (mirrors every other ds-lib request).
-    pub auth_token: AuthToken,
 }
 
 /// Client → DS: enqueue a FULL-commit pair (PQ half + T half) in a
 /// single round trip. The DS will deliver them PQ-first to every peer.
+///
+/// Like [`PublishApqMessageRequest`], this type intentionally omits
+/// `auth_token` — see that type's docs.
 #[derive(Debug, Clone, TlsSize, TlsSerialize, TlsDeserialize)]
 pub struct PublishApqCommitPairRequest {
     /// Wire envelope.
     pub pair: ApqCommitPair,
-    /// Caller's auth token.
-    pub auth_token: AuthToken,
 }
 
 /// DS → client: list of envelopes pending for this client.

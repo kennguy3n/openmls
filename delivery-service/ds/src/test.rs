@@ -513,7 +513,6 @@ async fn apq_publish_and_recv_single_message_round_trips() {
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
     let publish = PublishApqMessageRequest {
         message: ApqMessage::new_t(b"hello-apq".to_vec()),
-        auth_token: auth_token.clone(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
@@ -563,7 +562,6 @@ async fn apq_publish_and_recv_single_message_round_trips() {
     // queue is non-empty when the unauthorized request arrives.
     let publish = PublishApqMessageRequest {
         message: ApqMessage::new_t(b"sensitive".to_vec()),
-        auth_token: auth_token.clone(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
@@ -663,10 +661,7 @@ async fn apq_publish_pair_round_trips_full_commit() {
 
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
     let pair = ApqCommitPair::new(7, b"pq-half".to_vec(), b"t-half".to_vec());
-    let publish = PublishApqCommitPairRequest {
-        pair: pair.clone(),
-        auth_token: auth_token.clone(),
-    };
+    let publish = PublishApqCommitPairRequest { pair: pair.clone() };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
 
@@ -714,7 +709,6 @@ async fn apq_publish_to_unknown_recipient_is_not_found() {
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(b"nobody".as_slice())].into();
     let publish = PublishApqMessageRequest {
         message: ApqMessage::new_t(b"unreachable".to_vec()),
-        auth_token: ds_lib::messages::AuthToken::default(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
@@ -776,15 +770,10 @@ async fn reset_clears_apq_queues() {
         .to_request();
     let response = test::call_service(&app, req).await;
     assert_eq!(response.status(), StatusCode::OK);
-    let register_resp_bytes = response.into_body().try_into_bytes().unwrap();
-    let register_resp = RegisterClientSuccessResponse::tls_deserialize_exact(&register_resp_bytes)
-        .expect("decode RegisterClientSuccessResponse");
-    let auth_token = register_resp.auth_token;
 
     let recipients: TlsVecU32<TlsByteVecU8> = vec![TlsByteVecU8::from(identity.as_slice())].into();
     let publish = PublishApqMessageRequest {
         message: ApqMessage::new_t(b"about-to-be-reset".to_vec()),
-        auth_token: auth_token.clone(),
     };
     let mut payload = recipients.tls_serialize_detached().unwrap();
     payload.extend_from_slice(&publish.tls_serialize_detached().unwrap());
