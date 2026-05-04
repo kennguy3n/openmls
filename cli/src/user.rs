@@ -592,6 +592,19 @@ impl User {
         log::debug!("{} creates {:?} group {}", self.username(), mode, name,);
         let group_id = name.as_bytes();
 
+        // Reject duplicate names BEFORE we ask the provider to create
+        // the underlying `MlsGroup`. `MlsGroup::new_with_group_id`
+        // persists the new group to the storage provider keyed by
+        // `GroupId::from_slice(name.as_bytes())`, so calling it ahead
+        // of this check would overwrite the existing group's persisted
+        // state and leave the in-memory `self.groups` entry pointing
+        // at a stale `MlsGroup` reference. Failing fast here keeps
+        // both the on-disk and in-memory views consistent on the
+        // duplicate-name error path.
+        if self.groups.borrow().contains_key(&name) {
+            return Err(format!("Group '{name}' existed already"));
+        }
+
         let ciphersuite = mode.default_ciphersuite()?;
 
         // NOTE: Since the DS currently doesn't distribute copies of the group's ratchet
@@ -616,10 +629,6 @@ impl User {
             mls_group: RefCell::new(mls_group),
             security_mode: mode.to_security_mode(),
         };
-
-        if self.groups.borrow().contains_key(&name) {
-            return Err(format!("Group '{name}' existed already"));
-        }
 
         self.groups.borrow_mut().insert(name, group);
 
