@@ -425,9 +425,9 @@ fn hpke_kem(kem: HpkeKemType) -> Result<hpke_rs_crypto::types::KemAlgorithm, Cry
         // libcrux HPKE backend; reject explicitly so callers see the
         // same `UnsupportedCiphersuite` signal they would for any
         // other suite this provider does not speak.
-        HpkeKemType::MlKem768X25519Draft | HpkeKemType::MlKem1024Draft => {
-            Err(CryptoError::UnsupportedCiphersuite)
-        }
+        HpkeKemType::MlKem768X25519Draft
+        | HpkeKemType::MlKem768Draft
+        | HpkeKemType::MlKem1024Draft => Err(CryptoError::UnsupportedCiphersuite),
     }
 }
 

@@ -169,6 +169,9 @@ fn ciphersuite_uses_pq_kem(cs: Ciphersuite) -> bool {
             | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519
             | Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519
             | Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448
+            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519
+            | Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65
+            | Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65
     )
 }
 
@@ -238,12 +241,30 @@ mod tests {
             Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_Ed25519,
             Ciphersuite::MLS_256_MLKEM768_X25519_CHACHA20POLY1305_SHA256_Ed25519,
             Ciphersuite::MLS_256_MLKEM1024_AES256GCM_SHA512_Ed448,
+            // Pure ML-KEM-768 + Ed25519 (PQ batch 4) is also
+            // confidentiality-only because the signature stays classical.
+            Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_Ed25519,
         ] {
             // PQ / hybrid KEM + classical signature → PqConfidentiality.
             assert_eq!(
                 SecurityMode::from_ciphersuite(cs),
                 SecurityMode::PqConfidentiality,
                 "expected PqConfidentiality for {cs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_ciphersuite_ml_kem_with_mldsa_is_pq_authenticity() {
+        for cs in [
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65,
+            Ciphersuite::MLS_256_MLKEM768_AES256GCM_SHA384_MLDSA65,
+        ] {
+            // PQ KEM + ML-DSA signature → PqAuthenticity.
+            assert_eq!(
+                SecurityMode::from_ciphersuite(cs),
+                SecurityMode::PqAuthenticity,
+                "expected PqAuthenticity for {cs:?}"
             );
         }
     }
