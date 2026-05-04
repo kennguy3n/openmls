@@ -1,6 +1,6 @@
 # KChat Quantum Resistance Migration Phases
 
-**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~90%)**
+**Current status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress (~95%)**
 
 This document defines the staged migration plan for taking KChat from
 classical MLS to a mixed CLASSICAL / `PQ_CONFIDENTIALITY` / `PQ_AUTHENTICITY`

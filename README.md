@@ -102,6 +102,19 @@ cargo test -p openmls --test multi_ciphersuite_public_api
 cargo test -p openmls --test pq_apq_delivery_wire_tests
 cargo test -p openmls --test pq_migration_state_tests
 
+# Real-crypto APQ end-to-end (libcrux + xwing).
+cargo test -p openmls --features xwing,libcrux-provider \
+    --test pq_real_crypto_e2e_tests
+
+# Reference DS APQ message routing.
+cargo test -p mls-ds
+
+# SQLite `MigrationStorage` integration tests.
+cargo test -p openmls_sqlite_storage
+
+# PQ orchestration benchmarks.
+cargo bench -p openmls --bench pq_benchmark
+
 # High-scale load tests are gated behind `#[ignore]`; opt in with --ignored.
 cargo test -p openmls --test pq_load_tests          -- --ignored
 cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored
@@ -110,6 +123,9 @@ cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored
 cargo fmt --all -- --check
 cargo clippy --workspace --tests -- -D warnings
 ```
+
+CI runs every command above on push to `main` and on pull requests via
+[`.github/workflows/pq-tests.yml`](./.github/workflows/pq-tests.yml).
 
 ## Documentation index
 

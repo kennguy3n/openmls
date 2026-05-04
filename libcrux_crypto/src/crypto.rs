@@ -52,6 +52,10 @@ impl OpenMlsCrypto for CryptoProvider {
             SignatureScheme::ED25519 => Ok(()),
             #[cfg(feature = "mldsa")]
             SignatureScheme::MLDSA65 => Ok(()),
+            #[cfg(feature = "mldsa44")]
+            SignatureScheme::MLDSA44 => Ok(()),
+            #[cfg(feature = "mldsa87")]
+            SignatureScheme::MLDSA87 => Ok(()),
             _ => Err(CryptoError::UnsupportedCiphersuite),
         }?;
 
@@ -243,6 +247,10 @@ impl OpenMlsCrypto for CryptoProvider {
             }
             #[cfg(feature = "mldsa")]
             SignatureScheme::MLDSA65 => mldsa65::keygen(self),
+            #[cfg(feature = "mldsa44")]
+            SignatureScheme::MLDSA44 => mldsa44::keygen(self),
+            #[cfg(feature = "mldsa87")]
+            SignatureScheme::MLDSA87 => mldsa87::keygen(self),
             _ => Err(CryptoError::UnsupportedSignatureScheme),
         }
     }
@@ -267,6 +275,10 @@ impl OpenMlsCrypto for CryptoProvider {
             }
             #[cfg(feature = "mldsa")]
             SignatureScheme::MLDSA65 => mldsa65::verify(data, pk, signature),
+            #[cfg(feature = "mldsa44")]
+            SignatureScheme::MLDSA44 => mldsa44::verify(data, pk, signature),
+            #[cfg(feature = "mldsa87")]
+            SignatureScheme::MLDSA87 => mldsa87::verify(data, pk, signature),
             _ => Err(CryptoError::UnsupportedSignatureScheme),
         }
     }
@@ -281,6 +293,10 @@ impl OpenMlsCrypto for CryptoProvider {
             }
             #[cfg(feature = "mldsa")]
             SignatureScheme::MLDSA65 => mldsa65::sign(self, data, key),
+            #[cfg(feature = "mldsa44")]
+            SignatureScheme::MLDSA44 => mldsa44::sign(self, data, key),
+            #[cfg(feature = "mldsa87")]
+            SignatureScheme::MLDSA87 => mldsa87::sign(self, data, key),
             _ => Err(CryptoError::UnsupportedSignatureScheme),
         }
     }
@@ -596,6 +612,157 @@ mod mldsa65 {
     }
 }
 
+/// ML-DSA-44 (FIPS 204) sign / verify / keygen wired through libcrux.
+///
+/// Identical structure to [`mldsa65`] — kept in its own module for
+/// clarity, and gated behind the independent `mldsa44` feature so
+/// consumers can pick exactly the parameter sets their device
+/// supports.
+#[cfg(feature = "mldsa44")]
+mod mldsa44 {
+    use super::*;
+    use libcrux_ml_dsa::{
+        ml_dsa_44::{self, MLDSA44Signature, MLDSA44SigningKey, MLDSA44VerificationKey},
+        KEY_GENERATION_RANDOMNESS_SIZE, SIGNING_RANDOMNESS_SIZE,
+    };
+
+    pub(super) const SIGNING_KEY_LEN: usize = MLDSA44SigningKey::len();
+    pub(super) const VERIFICATION_KEY_LEN: usize = MLDSA44VerificationKey::len();
+    pub(super) const SIGNATURE_LEN: usize = MLDSA44Signature::len();
+
+    pub(super) fn keygen(provider: &CryptoProvider) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+        let mut rng = provider
+            .rng
+            .lock()
+            .map_err(|_| CryptoError::CryptoLibraryError)
+            .map(GuardedRng)?;
+
+        let mut randomness = [0u8; KEY_GENERATION_RANDOMNESS_SIZE];
+        rng.fill_bytes(&mut randomness);
+
+        let kp = ml_dsa_44::generate_key_pair(randomness);
+        let signing_key: Vec<u8> = kp.signing_key.as_ref().to_vec();
+        let verification_key: Vec<u8> = kp.verification_key.as_ref().to_vec();
+        Ok((signing_key, verification_key))
+    }
+
+    pub(super) fn sign(
+        provider: &CryptoProvider,
+        data: &[u8],
+        signing_key_bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let signing_key_bytes: [u8; SIGNING_KEY_LEN] = signing_key_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+
+        let mut rng = provider
+            .rng
+            .lock()
+            .map_err(|_| CryptoError::CryptoLibraryError)
+            .map(GuardedRng)?;
+        let mut randomness = [0u8; SIGNING_RANDOMNESS_SIZE];
+        rng.fill_bytes(&mut randomness);
+        drop(rng);
+
+        let signing_key = MLDSA44SigningKey::new(signing_key_bytes);
+        let signature = ml_dsa_44::sign(&signing_key, data, b"", randomness)
+            .map_err(|_| CryptoError::SigningError)?;
+        Ok(signature.as_ref().to_vec())
+    }
+
+    pub(super) fn verify(
+        data: &[u8],
+        verification_key_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<(), CryptoError> {
+        let verification_key_bytes: [u8; VERIFICATION_KEY_LEN] = verification_key_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+        let signature_bytes: [u8; SIGNATURE_LEN] = signature_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+
+        let verification_key = MLDSA44VerificationKey::new(verification_key_bytes);
+        let signature = MLDSA44Signature::new(signature_bytes);
+
+        ml_dsa_44::verify(&verification_key, data, b"", &signature)
+            .map_err(|_| CryptoError::InvalidSignature)
+    }
+}
+
+/// ML-DSA-87 (FIPS 204) sign / verify / keygen wired through libcrux.
+#[cfg(feature = "mldsa87")]
+mod mldsa87 {
+    use super::*;
+    use libcrux_ml_dsa::{
+        ml_dsa_87::{self, MLDSA87Signature, MLDSA87SigningKey, MLDSA87VerificationKey},
+        KEY_GENERATION_RANDOMNESS_SIZE, SIGNING_RANDOMNESS_SIZE,
+    };
+
+    pub(super) const SIGNING_KEY_LEN: usize = MLDSA87SigningKey::len();
+    pub(super) const VERIFICATION_KEY_LEN: usize = MLDSA87VerificationKey::len();
+    pub(super) const SIGNATURE_LEN: usize = MLDSA87Signature::len();
+
+    pub(super) fn keygen(provider: &CryptoProvider) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+        let mut rng = provider
+            .rng
+            .lock()
+            .map_err(|_| CryptoError::CryptoLibraryError)
+            .map(GuardedRng)?;
+
+        let mut randomness = [0u8; KEY_GENERATION_RANDOMNESS_SIZE];
+        rng.fill_bytes(&mut randomness);
+
+        let kp = ml_dsa_87::generate_key_pair(randomness);
+        let signing_key: Vec<u8> = kp.signing_key.as_ref().to_vec();
+        let verification_key: Vec<u8> = kp.verification_key.as_ref().to_vec();
+        Ok((signing_key, verification_key))
+    }
+
+    pub(super) fn sign(
+        provider: &CryptoProvider,
+        data: &[u8],
+        signing_key_bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let signing_key_bytes: [u8; SIGNING_KEY_LEN] = signing_key_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+
+        let mut rng = provider
+            .rng
+            .lock()
+            .map_err(|_| CryptoError::CryptoLibraryError)
+            .map(GuardedRng)?;
+        let mut randomness = [0u8; SIGNING_RANDOMNESS_SIZE];
+        rng.fill_bytes(&mut randomness);
+        drop(rng);
+
+        let signing_key = MLDSA87SigningKey::new(signing_key_bytes);
+        let signature = ml_dsa_87::sign(&signing_key, data, b"", randomness)
+            .map_err(|_| CryptoError::SigningError)?;
+        Ok(signature.as_ref().to_vec())
+    }
+
+    pub(super) fn verify(
+        data: &[u8],
+        verification_key_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<(), CryptoError> {
+        let verification_key_bytes: [u8; VERIFICATION_KEY_LEN] = verification_key_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+        let signature_bytes: [u8; SIGNATURE_LEN] = signature_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidLength)?;
+
+        let verification_key = MLDSA87VerificationKey::new(verification_key_bytes);
+        let signature = MLDSA87Signature::new(signature_bytes);
+
+        ml_dsa_87::verify(&verification_key, data, b"", &signature)
+            .map_err(|_| CryptoError::InvalidSignature)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,19 +814,121 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "mldsa44"))]
     #[test]
-    fn test_libcrux_rejects_unsupported_mldsa_levels() {
-        // ML-DSA-44 and ML-DSA-87 are not implemented in this provider
-        // even when the `mldsa` feature is enabled — only ML-DSA-65 is
-        // wired.
+    fn test_libcrux_rejects_mldsa44_without_feature() {
         let provider = CryptoProvider::new().expect("crypto provider");
-        for scheme in [SignatureScheme::MLDSA44, SignatureScheme::MLDSA87] {
-            assert_eq!(
-                provider.signature_key_gen(scheme).err(),
-                Some(CryptoError::UnsupportedSignatureScheme),
-                "libcrux provider must not implement ML-DSA scheme {scheme:?}"
-            );
-        }
+        assert_eq!(
+            provider.signature_key_gen(SignatureScheme::MLDSA44).err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA44 when `mldsa44` feature is off"
+        );
+        assert_eq!(
+            provider
+                .sign(SignatureScheme::MLDSA44, b"data", b"key")
+                .err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA44 sign without `mldsa44` feature"
+        );
+        assert_eq!(
+            provider
+                .verify_signature(SignatureScheme::MLDSA44, b"data", b"pk", b"sig")
+                .err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA44 verify without `mldsa44` feature"
+        );
+    }
+
+    #[cfg(not(feature = "mldsa87"))]
+    #[test]
+    fn test_libcrux_rejects_mldsa87_without_feature() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        assert_eq!(
+            provider.signature_key_gen(SignatureScheme::MLDSA87).err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA87 when `mldsa87` feature is off"
+        );
+        assert_eq!(
+            provider
+                .sign(SignatureScheme::MLDSA87, b"data", b"key")
+                .err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA87 sign without `mldsa87` feature"
+        );
+        assert_eq!(
+            provider
+                .verify_signature(SignatureScheme::MLDSA87, b"data", b"pk", b"sig")
+                .err(),
+            Some(CryptoError::UnsupportedSignatureScheme),
+            "libcrux provider must reject MLDSA87 verify without `mldsa87` feature"
+        );
+    }
+
+    #[cfg(feature = "mldsa44")]
+    #[test]
+    fn test_libcrux_mldsa44_keygen_sign_verify_roundtrip() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        let (sk, vk) = provider
+            .signature_key_gen(SignatureScheme::MLDSA44)
+            .expect("MLDSA44 keygen must succeed when feature is on");
+        // FIPS 204 ML-DSA-44 fixed sizes.
+        assert_eq!(sk.len(), 2560, "ML-DSA-44 signing key should be 2560 bytes");
+        assert_eq!(
+            vk.len(),
+            1312,
+            "ML-DSA-44 verification key should be 1312 bytes"
+        );
+
+        let message = b"hello pq world";
+        let signature = provider
+            .sign(SignatureScheme::MLDSA44, message, &sk)
+            .expect("MLDSA44 sign must succeed");
+        assert_eq!(signature.len(), 2420, "ML-DSA-44 signature is 2420 bytes");
+        provider
+            .verify_signature(SignatureScheme::MLDSA44, message, &vk, &signature)
+            .expect("MLDSA44 verify must succeed on a valid signature");
+        // Tampering with the message must invalidate the signature.
+        let mut tampered = message.to_vec();
+        tampered[0] ^= 0xff;
+        assert!(
+            provider
+                .verify_signature(SignatureScheme::MLDSA44, &tampered, &vk, &signature)
+                .is_err(),
+            "MLDSA44 verify must fail when the message is tampered with"
+        );
+    }
+
+    #[cfg(feature = "mldsa87")]
+    #[test]
+    fn test_libcrux_mldsa87_keygen_sign_verify_roundtrip() {
+        let provider = CryptoProvider::new().expect("crypto provider");
+        let (sk, vk) = provider
+            .signature_key_gen(SignatureScheme::MLDSA87)
+            .expect("MLDSA87 keygen must succeed when feature is on");
+        // FIPS 204 ML-DSA-87 fixed sizes.
+        assert_eq!(sk.len(), 4896, "ML-DSA-87 signing key should be 4896 bytes");
+        assert_eq!(
+            vk.len(),
+            2592,
+            "ML-DSA-87 verification key should be 2592 bytes"
+        );
+
+        let message = b"hello pq world";
+        let signature = provider
+            .sign(SignatureScheme::MLDSA87, message, &sk)
+            .expect("MLDSA87 sign must succeed");
+        assert_eq!(signature.len(), 4627, "ML-DSA-87 signature is 4627 bytes");
+        provider
+            .verify_signature(SignatureScheme::MLDSA87, message, &vk, &signature)
+            .expect("MLDSA87 verify must succeed on a valid signature");
+        let mut tampered = message.to_vec();
+        tampered[0] ^= 0xff;
+        assert!(
+            provider
+                .verify_signature(SignatureScheme::MLDSA87, &tampered, &vk, &signature)
+                .is_err(),
+            "MLDSA87 verify must fail when the message is tampered with"
+        );
     }
 
     #[cfg(not(feature = "mldsa"))]

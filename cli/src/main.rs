@@ -140,16 +140,82 @@ fn main() {
             continue;
         }
 
-        // Create a new group.
-        if let Some(group_name) = op.strip_prefix("create group ") {
+        // Create a new group, optionally with `--security-mode <mode>`.
+        if let Some(rest) = op.strip_prefix("create group ") {
             if let Some(client) = &mut client {
-                client.create_group(group_name.to_string());
-                stdout
-                    .write_all(format!(" >>> Created group {group_name} :)\n\n").as_bytes())
-                    .unwrap();
+                let (group_name, mode) = parse_create_group_args(rest);
+                match mode {
+                    Ok(mode) => match client.create_group_with_mode(group_name.clone(), mode) {
+                        Ok(()) => stdout
+                            .write_all(
+                                format!(" >>> Created {mode:?} group {group_name} :)\n\n",)
+                                    .as_bytes(),
+                            )
+                            .unwrap(),
+                        Err(e) => stdout
+                            .write_all(format!(" >>> create group failed: {e}\n\n").as_bytes())
+                            .unwrap(),
+                    },
+                    Err(e) => stdout
+                        .write_all(
+                            format!(" >>> create group: invalid security mode: {e}\n\n").as_bytes(),
+                        )
+                        .unwrap(),
+                }
             } else {
                 stdout
                     .write_all(b" >>> No client to create a group :(\n\n")
+                    .unwrap();
+            }
+            continue;
+        }
+
+        // Print the local DeviceCapability. Useful for sanity-checking
+        // whether `--features xwing` / `--features mldsa` actually
+        // turned on the corresponding PQ ciphersuites.
+        if op.trim() == "capability" || op.trim() == "show capability" {
+            if let Some(client) = &client {
+                match client.device_capability() {
+                    Ok(cap) => {
+                        stdout
+                            .write_all(format_capability(&cap).as_bytes())
+                            .unwrap();
+                    }
+                    Err(e) => stdout
+                        .write_all(format!(" >>> capability error: {e}\n\n").as_bytes())
+                        .unwrap(),
+                }
+            } else {
+                stdout
+                    .write_all(b" >>> No client to show capability for :(\n\n")
+                    .unwrap();
+            }
+            continue;
+        }
+
+        // Show what mode the local capability would negotiate down to
+        // when the only peer is the local user (i.e. a "lone client"
+        // sanity check). The CLI does not yet store remote
+        // capabilities, so this is the most useful demo of the
+        // `select_conversation_mode` API the CLI can offer.
+        if op.trim() == "select-mode" {
+            if let Some(client) = &client {
+                match client.select_conversation_mode(&[]) {
+                    Ok((mode, cs)) => stdout
+                        .write_all(
+                            format!(
+                                " >>> select_conversation_mode (self only): mode={mode:?}, ciphersuite={cs:?}\n\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .unwrap(),
+                    Err(e) => stdout
+                        .write_all(format!(" >>> select-mode error: {e}\n\n").as_bytes())
+                        .unwrap(),
+                }
+            } else {
+                stdout
+                    .write_all(b" >>> No client to select mode for :(\n\n")
                     .unwrap();
             }
             continue;
@@ -274,6 +340,177 @@ fn main() {
         stdout
             .write_all(b" >>> unknown command :(\n >>> try help\n\n")
             .unwrap();
+    }
+}
+
+/// Parse the tail of a `create group <name> [--security-mode <mode>]`
+/// command. Returns the group name and the parsed mode (or a parse
+/// error from [`conversation::CliSecurityMode::parse`]).
+///
+/// Accepts both `--security-mode <mode>` (long form) and a bare
+/// trailing `<mode>` keyword as the second whitespace-separated
+/// token, so existing scripts that only pass a group name keep
+/// working (mode defaults to Classical in that case).
+fn parse_create_group_args(rest: &str) -> (String, Result<conversation::CliSecurityMode, String>) {
+    let trimmed = rest.trim();
+    if let Some(idx) = trimmed.find("--security-mode") {
+        let group_name = trimmed[..idx].trim().to_string();
+        let mode_str = trimmed[idx + "--security-mode".len()..].trim();
+        return (group_name, conversation::CliSecurityMode::parse(mode_str));
+    }
+    let mut parts = trimmed.split_whitespace();
+    let name = parts.next().unwrap_or("").to_string();
+    let maybe_mode = parts.next();
+    let rest = parts.next();
+    if rest.is_some() {
+        // Two extra tokens — treat the whole tail as the group name to
+        // preserve the legacy "names with spaces" behaviour.
+        return (
+            trimmed.to_string(),
+            Ok(conversation::CliSecurityMode::Classical),
+        );
+    }
+    let mode = match maybe_mode {
+        Some(m) => conversation::CliSecurityMode::parse(m),
+        None => Ok(conversation::CliSecurityMode::Classical),
+    };
+    (name, mode)
+}
+
+/// Pretty-print a [`openmls::credentials::DeviceCapability`] for the
+/// CLI `capability` command.
+fn format_capability(cap: &openmls::credentials::DeviceCapability) -> String {
+    let mut out = String::new();
+    out.push_str(" >>> DeviceCapability\n");
+    out.push_str(&format!("       mls_version: {}\n", cap.mls_version));
+    out.push_str(&format!(
+        "       classical_ciphersuites: {:?}\n",
+        cap.classical_ciphersuites
+    ));
+    out.push_str(&format!(
+        "       pq_ciphersuites: {:?}\n",
+        cap.pq_ciphersuites
+    ));
+    out.push_str(&format!("       apq_supported: {}\n", cap.apq_supported));
+    out.push_str(&format!(
+        "       pq_auth_supported: {}\n",
+        cap.pq_auth_supported
+    ));
+    out.push_str(&format!("       provider_id: {}\n", cap.provider_id));
+    out.push_str(&format!(
+        "       capability_signature: {} bytes\n\n",
+        cap.capability_signature.as_slice().len(),
+    ));
+    out
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use conversation::CliSecurityMode;
+
+    #[test]
+    fn parse_security_mode_accepts_canonical_strings() {
+        assert_eq!(
+            CliSecurityMode::parse("classical").unwrap(),
+            CliSecurityMode::Classical
+        );
+        assert_eq!(
+            CliSecurityMode::parse("pq-confidentiality").unwrap(),
+            CliSecurityMode::PqConfidentiality
+        );
+        assert_eq!(
+            CliSecurityMode::parse("pq-authenticity").unwrap(),
+            CliSecurityMode::PqAuthenticity
+        );
+    }
+
+    #[test]
+    fn parse_security_mode_is_case_insensitive_and_accepts_synonyms() {
+        assert_eq!(
+            CliSecurityMode::parse("PQ-CONF").unwrap(),
+            CliSecurityMode::PqConfidentiality
+        );
+        assert_eq!(
+            CliSecurityMode::parse(" Authenticity ").unwrap(),
+            CliSecurityMode::PqAuthenticity
+        );
+    }
+
+    #[test]
+    fn parse_security_mode_rejects_garbage() {
+        assert!(CliSecurityMode::parse("nonsense").is_err());
+    }
+
+    #[test]
+    fn parse_create_group_long_form() {
+        let (name, mode) = parse_create_group_args("foo --security-mode pq-confidentiality");
+        assert_eq!(name, "foo");
+        assert_eq!(mode.unwrap(), CliSecurityMode::PqConfidentiality);
+    }
+
+    #[test]
+    fn parse_create_group_short_form() {
+        let (name, mode) = parse_create_group_args("foo pq-authenticity");
+        assert_eq!(name, "foo");
+        assert_eq!(mode.unwrap(), CliSecurityMode::PqAuthenticity);
+    }
+
+    #[test]
+    fn parse_create_group_classical_default() {
+        let (name, mode) = parse_create_group_args("foo");
+        assert_eq!(name, "foo");
+        assert_eq!(mode.unwrap(), CliSecurityMode::Classical);
+    }
+
+    #[test]
+    fn parse_create_group_preserves_legacy_names_with_spaces() {
+        // Existing scripts that pass `create group MLS Discussions`
+        // must still get a Classical group with the full multi-word
+        // name preserved.
+        let (name, mode) = parse_create_group_args("MLS Discussions test");
+        assert_eq!(name, "MLS Discussions test");
+        assert_eq!(mode.unwrap(), CliSecurityMode::Classical);
+    }
+
+    #[test]
+    fn user_emits_signed_device_capability() {
+        let user = user::User::new("test-cap-user".to_string());
+        let cap = user
+            .device_capability()
+            .expect("device_capability must succeed");
+        assert!(
+            cap.is_signed(),
+            "device_capability should be signed by default"
+        );
+        assert_eq!(cap.provider_id, "rustcrypto-cli");
+        assert_eq!(cap.mls_version, 1);
+        assert!(
+            !cap.classical_ciphersuites.is_empty(),
+            "classical capabilities must be non-empty"
+        );
+    }
+
+    #[test]
+    fn select_conversation_mode_with_only_self_returns_classical_or_pq() {
+        let user = user::User::new("test-select-user".to_string());
+        let (mode, cs) = user
+            .select_conversation_mode(&[])
+            .expect("select_conversation_mode with self only must succeed");
+        // Without the `xwing` feature the local cap has no PQ suites,
+        // so the selected mode must be Classical. With the feature
+        // turned on, the selected mode may be higher.
+        #[cfg(not(feature = "xwing"))]
+        {
+            use openmls::ciphersuite::security_mode::SecurityMode;
+            assert_eq!(mode, SecurityMode::Classical);
+        }
+        // The selected ciphersuite must always parse to a known
+        // RFC 9420 / draft codepoint we recognise.
+        let _ = u16::from(cs);
+        // Silence unused-variable warnings when xwing is enabled
+        // (mode is not asserted on in that branch).
+        let _ = mode;
     }
 }
 

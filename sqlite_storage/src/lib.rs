@@ -32,6 +32,7 @@ mod encryption_key_pairs;
 mod epoch_key_pairs;
 mod group_data;
 mod key_packages;
+pub mod migration;
 mod own_leaf_nodes;
 mod proposals;
 mod psks;
@@ -40,6 +41,7 @@ mod storage_provider;
 mod wrappers;
 
 pub use codec::Codec;
+pub use migration::{MigrationStateRow, MigrationStepRow, SqliteMigrationStorage};
 pub use rusqlite::Connection;
 pub use storage_provider::SqliteStorageProvider;
 

@@ -484,6 +484,108 @@ mod mldsa_runner {
     }
 }
 
+// ML-DSA-44 sign/verify round-trip runner — gated behind the
+// independent `mldsa44` feature on `openmls_libcrux_crypto`.
+#[cfg(feature = "mldsa44")]
+mod mldsa44_runner {
+    use super::*;
+    use openmls_libcrux_crypto::Provider as LibcruxProvider;
+    use openmls_traits::crypto::OpenMlsCrypto;
+    use openmls_traits::types::SignatureScheme;
+    use openmls_traits::OpenMlsProvider;
+
+    fn vectors_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("pq_kat_vectors")
+            .join("ml_dsa.json")
+    }
+
+    #[test]
+    fn run_all_mldsa44_kats_loads_and_validates() {
+        let provider = LibcruxProvider::default();
+        let vectors = load_vectors(&vectors_path()).expect("load ml_dsa.json");
+        for v in &vectors {
+            let (sk, vk) = provider
+                .crypto()
+                .signature_key_gen(SignatureScheme::MLDSA44)
+                .expect("MLDSA44 keygen");
+            let message = format!("openmls-mldsa44-kat:{}", v.name);
+            let sig = provider
+                .crypto()
+                .sign(SignatureScheme::MLDSA44, message.as_bytes(), &sk)
+                .expect("MLDSA44 sign");
+            provider
+                .crypto()
+                .verify_signature(SignatureScheme::MLDSA44, message.as_bytes(), &vk, &sig)
+                .expect("MLDSA44 verify");
+            let mut tampered = sig.clone();
+            let mid = tampered.len() / 2;
+            tampered[mid] ^= 0x01;
+            assert!(
+                provider
+                    .crypto()
+                    .verify_signature(SignatureScheme::MLDSA44, message.as_bytes(), &vk, &tampered,)
+                    .is_err(),
+                "MLDSA44 verify must fail on tampered signature for vector {}",
+                v.name
+            );
+        }
+        eprintln!("ml-dsa-44 KATs: {} vector(s) processed", vectors.len());
+    }
+}
+
+// ML-DSA-87 sign/verify round-trip runner — gated behind the
+// independent `mldsa87` feature on `openmls_libcrux_crypto`.
+#[cfg(feature = "mldsa87")]
+mod mldsa87_runner {
+    use super::*;
+    use openmls_libcrux_crypto::Provider as LibcruxProvider;
+    use openmls_traits::crypto::OpenMlsCrypto;
+    use openmls_traits::types::SignatureScheme;
+    use openmls_traits::OpenMlsProvider;
+
+    fn vectors_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("pq_kat_vectors")
+            .join("ml_dsa.json")
+    }
+
+    #[test]
+    fn run_all_mldsa87_kats_loads_and_validates() {
+        let provider = LibcruxProvider::default();
+        let vectors = load_vectors(&vectors_path()).expect("load ml_dsa.json");
+        for v in &vectors {
+            let (sk, vk) = provider
+                .crypto()
+                .signature_key_gen(SignatureScheme::MLDSA87)
+                .expect("MLDSA87 keygen");
+            let message = format!("openmls-mldsa87-kat:{}", v.name);
+            let sig = provider
+                .crypto()
+                .sign(SignatureScheme::MLDSA87, message.as_bytes(), &sk)
+                .expect("MLDSA87 sign");
+            provider
+                .crypto()
+                .verify_signature(SignatureScheme::MLDSA87, message.as_bytes(), &vk, &sig)
+                .expect("MLDSA87 verify");
+            let mut tampered = sig.clone();
+            let mid = tampered.len() / 2;
+            tampered[mid] ^= 0x01;
+            assert!(
+                provider
+                    .crypto()
+                    .verify_signature(SignatureScheme::MLDSA87, message.as_bytes(), &vk, &tampered,)
+                    .is_err(),
+                "MLDSA87 verify must fail on tampered signature for vector {}",
+                v.name
+            );
+        }
+        eprintln!("ml-dsa-87 KATs: {} vector(s) processed", vectors.len());
+    }
+}
+
 // =============================================================================
 // FIPS 203 (ML-KEM) KAT runner — schema-validates only, since neither
 // the libcrux nor the RustCrypto provider currently exposes ML-KEM

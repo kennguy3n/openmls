@@ -363,7 +363,14 @@ marker (`NotStarted` / `InProgress(step)` / `Complete` /
 `Failed(reason)`), and a `StorageMigrator` that runs each step
 check-before-write, persists progress between steps, and resumes from
 the marker on the next start. Concrete backends (SQLite, Sled, etc.)
-plug in by implementing the `MigrationStorage` trait.
+plug in by implementing the `MigrationStorage` trait. The
+[`sqlite_storage::migration`](./sqlite_storage/src/migration.rs)
+module ships the SQLite implementation: each migration step
+idempotently creates the underlying tables (`apq_info`,
+`conversation_mapping`, `psk_material`, `commit_counters`,
+`anti_downgrade_state`), `read_state` / `persist_state` round-trip
+through a `migration_state` row, and the `*_present` validators
+underpin `validate_post_migration`.
 
 ## Main Risks
 

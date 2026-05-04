@@ -27,3 +27,10 @@ rand_chacha = { version = "0.9.0" }
 version = "1.5"
 git = "https://gitlab.redox-os.org/Jezza/termion.git"
 branch = "windows-support"
+
+[features]
+# Pull X-Wing draft KEM support through the openmls crate. Off by default
+# because the codepoint is in the IETF draft / private-use range.
+xwing = ["openmls/xwing", "openmls/libcrux-provider"]
+# Pull ML-DSA-65 (FIPS 204) signatures through the openmls crate.
+mldsa = ["openmls/mldsa", "openmls/libcrux-provider"]
