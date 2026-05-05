@@ -279,18 +279,19 @@ fn load_publish_ten_thousand_kps_across_a_thousand_devices() {
     let mut svc = KeyPackageService::new();
 
     const NUM_DEVICES: usize = 1_000;
-    // Cap is `MAX_KEY_PACKAGES_PER_DEVICE`; we publish 10/device =
-    // 10_000 KPs total.
+    // The service stores one standard KP per (user, device, ciphersuite)
+    // slot, so we model `KPS_PER_DEVICE` distinct device sub-IDs per
+    // logical device. Total slots = `NUM_DEVICES * KPS_PER_DEVICE` =
+    // 10_000, matching the original load-test target.
     const KPS_PER_DEVICE: usize = 10;
 
     let user_id = b"loadtest-user".to_vec();
     let publish_start = Instant::now();
     for d in 0..NUM_DEVICES {
-        let device_id = format!("dev-{d:05}").into_bytes();
-        for _ in 0..KPS_PER_DEVICE {
+        for k in 0..KPS_PER_DEVICE {
+            let device_id = format!("dev-{d:05}-{k:02}").into_bytes();
             let e = entry(&provider, "loadtest", 1_000_000, false);
-            svc.publish(user_id.clone(), device_id.clone(), e)
-                .expect("publish");
+            svc.publish(user_id.clone(), device_id, e).expect("publish");
         }
     }
     let publish_elapsed = publish_start.elapsed();
@@ -306,8 +307,8 @@ fn load_publish_ten_thousand_kps_across_a_thousand_devices() {
     // succeeds exactly once.
     let fetch_start = Instant::now();
     for d in 0..NUM_DEVICES {
-        let device_id = format!("dev-{d:05}").into_bytes();
-        for _ in 0..KPS_PER_DEVICE {
+        for k in 0..KPS_PER_DEVICE {
+            let device_id = format!("dev-{d:05}-{k:02}").into_bytes();
             let _ = svc.fetch(&user_id, &device_id, CS).expect("fetch");
         }
     }
@@ -334,16 +335,18 @@ fn load_expire_before_bulk_purge_at_scale() {
     const NUM_DEVICES: usize = 500;
     const KPS_PER_DEVICE: usize = 8;
 
-    // Publish half with old expiry, half with future expiry.
+    // Publish half with old expiry, half with future expiry. Each KP
+    // gets its own (user, device, ciphersuite) slot via a per-KP
+    // device sub-ID; the service rejects multiple standard KPs in the
+    // same slot.
     let user_id = b"expiry-user".to_vec();
     for d in 0..NUM_DEVICES {
-        let device_id = format!("dev-{d:05}").into_bytes();
         for i in 0..KPS_PER_DEVICE {
+            let device_id = format!("dev-{d:05}-{i:02}").into_bytes();
             // Even-indexed KPs expire at t=1000, odd-indexed at t=999_999.
             let expiry = if i.is_multiple_of(2) { 1_000 } else { 999_999 };
             let e = entry(&provider, "expiry", expiry, false);
-            svc.publish(user_id.clone(), device_id.clone(), e)
-                .expect("publish");
+            svc.publish(user_id.clone(), device_id, e).expect("publish");
         }
     }
     let total = NUM_DEVICES * KPS_PER_DEVICE;
@@ -409,48 +412,71 @@ fn load_last_resort_fallback_under_consumption_at_scale() {
     let mut svc = KeyPackageService::new();
 
     const NUM_DEVICES: usize = 200;
+    const STD_PER_DEVICE: usize = 4;
 
-    // Each device gets ONE last-resort + 4 standard KPs. Consume
-    // every standard KP; verify the last-resort survives every fetch.
+    // Each logical device gets ONE last-resort KP (in its own
+    // (user, device, ciphersuite) slot under `dev-{d:05}`) plus
+    // `STD_PER_DEVICE` standard KPs (each in its own slot under
+    // `dev-{d:05}-std-{k:02}`). The service stores one KP per slot,
+    // so each standard KP must use a distinct device sub-ID. The test
+    // then consumes every standard slot, then issues another round of
+    // fetches against the last-resort slot to confirm it survives.
     let user_id = b"lastresort-user".to_vec();
     for d in 0..NUM_DEVICES {
-        let device_id = format!("dev-{d:05}").into_bytes();
+        let lr_device_id = format!("dev-{d:05}").into_bytes();
         svc.publish(
             user_id.clone(),
-            device_id.clone(),
+            lr_device_id,
             entry(&provider, "lr", 1_000_000, true),
         )
         .expect("publish lr");
-        for _ in 0..4 {
+        for k in 0..STD_PER_DEVICE {
+            let std_device_id = format!("dev-{d:05}-std-{k:02}").into_bytes();
             svc.publish(
                 user_id.clone(),
-                device_id.clone(),
+                std_device_id,
                 entry(&provider, "std", 1_000_000, false),
             )
             .expect("publish std");
         }
     }
+    assert_eq!(
+        svc.total_len(),
+        NUM_DEVICES * (STD_PER_DEVICE + 1),
+        "NUM_DEVICES last-resort slots + NUM_DEVICES * STD_PER_DEVICE standard slots"
+    );
+
     let consume_start = Instant::now();
     for d in 0..NUM_DEVICES {
-        let device_id = format!("dev-{d:05}").into_bytes();
-        // 4 standard fetches — each consumes one.
-        for _ in 0..4 {
-            assert!(svc.fetch(&user_id, &device_id, CS).is_some());
+        let lr_device_id = format!("dev-{d:05}").into_bytes();
+        // Standard fetches — each on its own slot, each consumes one.
+        for k in 0..STD_PER_DEVICE {
+            let std_device_id = format!("dev-{d:05}-std-{k:02}").into_bytes();
+            assert!(svc.fetch(&user_id, &std_device_id, CS).is_some());
         }
-        // 4 more fetches — all return the persistent last-resort KP.
-        for _ in 0..4 {
-            assert!(svc.fetch(&user_id, &device_id, CS).is_some());
+        // Last-resort fetches — all return the persistent last-resort KP
+        // for this device, which is never consumed.
+        for _ in 0..STD_PER_DEVICE {
+            assert!(svc.fetch(&user_id, &lr_device_id, CS).is_some());
         }
     }
     let consume_elapsed = consume_start.elapsed();
     eprintln!(
         "last-resort consumption: {} fetches in {:?} ({:.0} req/s)",
-        NUM_DEVICES * 8,
+        NUM_DEVICES * STD_PER_DEVICE * 2,
         consume_elapsed,
-        (NUM_DEVICES * 8) as f64 / consume_elapsed.as_secs_f64().max(1e-9)
+        (NUM_DEVICES * STD_PER_DEVICE * 2) as f64 / consume_elapsed.as_secs_f64().max(1e-9)
     );
-    // total_len counts standard KPs only — every standard was consumed.
-    assert_eq!(svc.total_len(), 0);
+    // Every standard KP was consumed; one last-resort per device
+    // survives.
+    assert_eq!(svc.total_len(), NUM_DEVICES);
+    for d in 0..NUM_DEVICES {
+        let lr_device_id = format!("dev-{d:05}").into_bytes();
+        assert!(
+            svc.fetch_last_resort(&user_id, &lr_device_id, CS).is_some(),
+            "last-resort for device {d} must survive standard consumption"
+        );
+    }
 }
 
 #[test]
