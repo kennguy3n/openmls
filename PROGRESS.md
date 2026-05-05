@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~95%**
+**Status: Phase 0 — Complete | Phase 1–6 — In progress | ~95%**
 
 ## Version Targets
 
@@ -128,7 +128,8 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 - [x] Implement `DeviceCapability` advertisement (struct, signing,
       verification, common-ciphersuite selection — see
       `openmls/src/credentials/device_capability.rs`). Server-side
-      registry/storage is still pending.
+      registry in `openmls/src/credentials/capability_registry.rs`;
+      wire protocol in `openmls/src/credentials/capability_protocol.rs`.
 - [x] Implement `SecurityMode` enum and selection logic (Classical /
       PqConfidentiality / PqAuthenticity, mode + ciphersuite selection from
       a peer set, no-downgrade transition helper — see
@@ -263,6 +264,29 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 | ~~No persistent client storage migration driver~~ | Fixed: idempotent `StorageMigrator` in `openmls/src/group/storage_migration.rs` plus a SQLite `MigrationStorage` implementation in `sqlite_storage/src/migration.rs` with crash-resume support and `validate_post_migration` checks |
 
 ## Changelog
+
+### 2026-05-05 (PQ batch 6 — doc reconciliation)
+
+- PROGRESS.md: status header simplified from
+  `Phase 1–2 / 3–6 — In progress` to `Phase 1–6 — In progress`.
+- PROGRESS.md: dropped the stale "Server-side registry/storage is
+  still pending" sentence from the `DeviceCapability` bullet and
+  replaced it with pointers to the in-tree registry
+  (`openmls/src/credentials/capability_registry.rs`) and wire
+  protocol (`openmls/src/credentials/capability_protocol.rs`),
+  matching the `~~No server-side capability protocol~~` row in the
+  Known Gaps table.
+- PHASES.md: matching status-header simplification.
+- PROPOSAL.md: bumped `Last updated` date to today (batch number
+  unchanged at PQ batch 6 — no new code in this entry).
+- README.md: repointed the `Tests & Checks` and `codecov` badge
+  links plus their underlying image-source URLs from
+  `openmls/openmls` to `kennguy3n/openmls` so the badges reflect
+  this fork's CI status.
+- PROGRESS.md `Last Updated` footer rolled to `2026-05-05 (PQ batch
+  6 — doc reconciliation)` to match the latest changelog entry.
+
+No code, test, or behavior changes — documentation only.
 
 ### 2026-05-04 (PQ batch 6 — SQLite migration storage, CI, CLI/WASM PQ surface, MLDSA44/87, real-crypto e2e, DS APQ routing, benchmarks)
 
@@ -727,4 +751,4 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 ## Last Updated
 
-2026-05-04 (PQ batch 6)
+2026-05-05 (PQ batch 6 — doc reconciliation)
