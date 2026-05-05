@@ -9,7 +9,7 @@
 //! This module implements the recovery primitives:
 //!
 //! - [`detect_desync`] — compute a [`DesyncReport`] over the live
-//!   epochs and the recorded [`ApqInfo`] / `last_full_commit_epoch`.
+//!   epochs and the recorded [`ApqInfo`](crate::extensions::ApqInfo) / `last_full_commit_epoch`.
 //! - [`resync_from_pq`] — apply a missed PQ commit and re-derive the
 //!   matching `apq_psk` so the next T commit can verify it.
 //! - [`resync_from_t`] — apply a missed T commit (the PSK is already in
@@ -43,7 +43,7 @@ pub const MAX_EPOCH_DRIFT: u64 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesyncStatus {
     /// Both sessions are in lockstep relative to the recorded
-    /// [`ApqInfo`] and `last_full_commit_epoch`.
+    /// [`ApqInfo`](crate::extensions::ApqInfo) and `last_full_commit_epoch`.
     InSync,
     /// PQ session is ahead by one epoch — typical sign that the PQ
     /// commit landed but the T commit is still in flight.

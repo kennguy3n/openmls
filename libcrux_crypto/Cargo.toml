@@ -50,6 +50,16 @@ xwing = []
 # `verify_signature` with `UnsupportedSignatureScheme`, exactly like the
 # RustCrypto provider.
 mldsa = ["dep:libcrux-ml-dsa"]
+# Enable the ML-DSA-44 signature scheme (FIPS 204).
+#
+# Same caveats as `mldsa`. Codepoint `0x0904` (draft / private-use). The
+# `mldsa44` feature is independent of `mldsa` so consumers can pick
+# exactly the parameter set their device supports.
+mldsa44 = ["dep:libcrux-ml-dsa"]
+# Enable the ML-DSA-87 signature scheme (FIPS 204).
+#
+# Same caveats as `mldsa`. Codepoint `0x0906` (draft / private-use).
+mldsa87 = ["dep:libcrux-ml-dsa"]
 
 extensions-draft-08 = [
     "openmls_traits/extensions-draft-08",

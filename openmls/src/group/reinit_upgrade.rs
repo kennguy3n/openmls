@@ -17,7 +17,7 @@
 //!    the proposal value.
 //! 2. [`commit_reinit`] stages a commit on the old group containing only
 //!    that ReInit proposal. After the commit is merged, the old group is
-//!    in the [`MlsGroupState::Inactive`] state — it can no longer be used
+//!    in the [`MlsGroupState::Inactive`](crate::group::MlsGroupState::Inactive) state — it can no longer be used
 //!    to send commits or messages.
 //! 3. [`complete_reinit`] derives the `Resumption(ReInit)` PSK from the
 //!    old group at its final epoch, persists it under a fresh
@@ -83,7 +83,7 @@ pub enum ReInitError {
         /// Mode the target ciphersuite would imply.
         target: SecurityMode,
     },
-    /// Old group is not in the [`MlsGroupState::Operational`] state — it
+    /// Old group is not in the [`MlsGroupState::Operational`](crate::group::MlsGroupState::Operational) state — it
     /// has either already been ReInit-ed or was previously evicted.
     #[error("old group is not active (already inactive / evicted)")]
     OldGroupInactive,
@@ -102,7 +102,7 @@ pub enum ReInitError {
     /// Persisting the resumption PSK in the provider's PSK store failed.
     #[error("resumption PSK store failed: {0}")]
     PskStoreFailed(String),
-    /// `commit_reinit` produced an [`MlsGroupState`] that the caller did
+    /// `commit_reinit` produced an [`MlsGroupState`](crate::group::MlsGroupState) that the caller did
     /// not expect.
     #[error("ReInit commit did not transition old group to Inactive (state machine drift)")]
     OldGroupStillActive,

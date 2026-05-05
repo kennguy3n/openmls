@@ -39,6 +39,9 @@ use std::sync::Mutex;
 use tls_codec::{Deserialize, Serialize, TlsSliceU16, TlsVecU32};
 
 use ds_lib::{
+    apq::{
+        ApqEnvelope, PublishApqCommitPairRequest, PublishApqMessageRequest, RecvApqMessagesResponse,
+    },
     messages::{
         PublishKeyPackagesRequest, RecvMessageRequest, RegisterClientRequest,
         RegisterClientSuccessResponse,
@@ -59,6 +62,12 @@ pub struct DsData {
 
     // (group_id, epoch)
     groups: Mutex<HashMap<Vec<u8>, u64>>,
+
+    /// Per-client APQ envelope queue. Envelopes are appended in
+    /// arrival order (PQ-first for FULL-commit pairs because the
+    /// `ApqEnvelope::CommitPair` variant carries both halves and the
+    /// receiver decides the dispatch order).
+    apq_queues: Mutex<HashMap<Vec<u8>, Vec<ApqEnvelope>>>,
 }
 
 macro_rules! unwrap_item {
@@ -159,8 +168,10 @@ async fn reset(req: HttpRequest, data: web::Data<DsData>) -> impl Responder {
     log::debug!("Resetting server");
     let mut clients = unwrap_data!(data.clients.lock());
     let mut groups = unwrap_data!(data.groups.lock());
+    let mut apq_queues = unwrap_data!(data.apq_queues.lock());
     clients.clear();
     groups.clear();
+    apq_queues.clear();
     actix_web::HttpResponse::Ok().finish()
 }
 
@@ -409,6 +420,192 @@ async fn msg_recv(
     }
 }
 
+// === APQ message routing ===
+//
+// Three endpoints carry the APQ wire envelopes defined in
+// `ds-lib/src/apq.rs`:
+//
+// - `POST /apq/publish` → enqueue a single `ApqMessage` for a list of
+//   recipients passed alongside the message in the wire request.
+// - `POST /apq/publish-pair` → enqueue a FULL-commit
+//   (PQ-half + T-half) pair for a list of recipients.
+// - `GET  /apq/recv/{client_id}` → drain the per-client queue and
+//   return a `RecvApqMessagesResponse` containing every pending
+//   envelope.
+//
+// The reference DS does *not* enforce the "PQ half before T half"
+// invariant on the wire — that's done by the
+// `openmls::messages::delivery_service::DeliveryService` ordering
+// layer. Here we just shuttle envelopes across the transport.
+
+/// Wire request for `POST /apq/publish`.
+///
+/// We don't use a TLS-codec'd struct here because we want a small,
+/// self-contained binding that's easy to test from
+/// `actix_web::test::TestRequest`. Instead we hand-frame: first a
+/// `TlsVecU32<TlsByteVecU8>` of recipient client IDs (one-byte length
+/// prefix per recipient ID, matching the wire format the tests
+/// produce), then the already-defined `PublishApqMessageRequest`.
+fn parse_publish_with_recipients(
+    bytes: &[u8],
+) -> Result<(Vec<Vec<u8>>, PublishApqMessageRequest), tls_codec::Error> {
+    let mut cursor = bytes;
+    let recipients = TlsVecU32::<TlsByteVecU8>::tls_deserialize(&mut cursor)?;
+    let req = PublishApqMessageRequest::tls_deserialize(&mut cursor)?;
+    Ok((
+        recipients
+            .into_vec()
+            .into_iter()
+            .map(|r| r.into_vec())
+            .collect(),
+        req,
+    ))
+}
+
+fn parse_publish_pair_with_recipients(
+    bytes: &[u8],
+) -> Result<(Vec<Vec<u8>>, PublishApqCommitPairRequest), tls_codec::Error> {
+    let mut cursor = bytes;
+    let recipients = TlsVecU32::<TlsByteVecU8>::tls_deserialize(&mut cursor)?;
+    let req = PublishApqCommitPairRequest::tls_deserialize(&mut cursor)?;
+    Ok((
+        recipients
+            .into_vec()
+            .into_iter()
+            .map(|r| r.into_vec())
+            .collect(),
+        req,
+    ))
+}
+
+#[post("/apq/publish")]
+async fn apq_publish(mut body: Payload, data: web::Data<DsData>) -> impl Responder {
+    let mut bytes = web::BytesMut::new();
+    while let Some(item) = body.next().await {
+        bytes.extend_from_slice(&unwrap_item!(item));
+    }
+
+    let (recipients, req) = match parse_publish_with_recipients(&bytes) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            log::error!("invalid /apq/publish payload: {e:?}");
+            return actix_web::HttpResponse::BadRequest().finish();
+        }
+    };
+
+    let clients = unwrap_data!(data.clients.lock());
+    for r in &recipients {
+        if !clients.contains_key(r) {
+            return actix_web::HttpResponse::NotFound().finish();
+        }
+    }
+    if recipients.is_empty() {
+        return actix_web::HttpResponse::BadRequest().finish();
+    }
+    drop(clients);
+
+    let envelope = ApqEnvelope::Message(req.message);
+    let mut queues = unwrap_data!(data.apq_queues.lock());
+    for r in recipients {
+        queues.entry(r).or_default().push(envelope.clone());
+    }
+    actix_web::HttpResponse::Ok().finish()
+}
+
+#[post("/apq/publish-pair")]
+async fn apq_publish_pair(mut body: Payload, data: web::Data<DsData>) -> impl Responder {
+    let mut bytes = web::BytesMut::new();
+    while let Some(item) = body.next().await {
+        bytes.extend_from_slice(&unwrap_item!(item));
+    }
+
+    let (recipients, req) = match parse_publish_pair_with_recipients(&bytes) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            log::error!("invalid /apq/publish-pair payload: {e:?}");
+            return actix_web::HttpResponse::BadRequest().finish();
+        }
+    };
+
+    let clients = unwrap_data!(data.clients.lock());
+    for r in &recipients {
+        if !clients.contains_key(r) {
+            return actix_web::HttpResponse::NotFound().finish();
+        }
+    }
+    if recipients.is_empty() {
+        return actix_web::HttpResponse::BadRequest().finish();
+    }
+    drop(clients);
+
+    let envelope = ApqEnvelope::CommitPair(req.pair);
+    let mut queues = unwrap_data!(data.apq_queues.lock());
+    for r in recipients {
+        queues.entry(r).or_default().push(envelope.clone());
+    }
+    actix_web::HttpResponse::Ok().finish()
+}
+
+/// `GET /apq/recv/{id}` — drain the per-client APQ queue.
+///
+/// Mirrors the auth model of [`msg_recv`]: the request body must be a
+/// TLS-codec'd [`RecvMessageRequest`] carrying the registered client's
+/// `auth_token`. The endpoint returns:
+///
+/// * `400 Bad Request` — the path is not valid base64 or the body is
+///   not a well-formed `RecvMessageRequest`.
+/// * `404 Not Found` — no client is registered under that ID.
+/// * `401 Unauthorized` — the supplied token does not match the
+///   client's stored token. Crucially, the queue is **not** drained
+///   on a token mismatch.
+/// * `200 OK` — body is a TLS-codec'd `RecvApqMessagesResponse`; the
+///   client's queue is removed.
+#[get("/apq/recv/{id}")]
+async fn apq_recv(
+    path: web::Path<String>,
+    mut body: Payload,
+    data: web::Data<DsData>,
+) -> impl Responder {
+    let mut bytes = web::BytesMut::new();
+    while let Some(item) = body.next().await {
+        bytes.extend_from_slice(&unwrap_item!(item));
+    }
+
+    let id = match base64::engine::general_purpose::URL_SAFE.decode(path.into_inner()) {
+        Ok(v) => v,
+        Err(_) => return actix_web::HttpResponse::BadRequest().finish(),
+    };
+
+    let req = match RecvMessageRequest::tls_deserialize(&mut &bytes[..]) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("invalid /apq/recv payload for {id:?}: {e:?}");
+            return actix_web::HttpResponse::BadRequest().finish();
+        }
+    };
+
+    let clients = unwrap_data!(data.clients.lock());
+    let client = match clients.get(&id) {
+        Some(c) => c,
+        None => return actix_web::HttpResponse::NotFound().finish(),
+    };
+    if req.auth_token != client.auth_token {
+        // Mismatched / forged token. Bail out **before** touching
+        // `apq_queues`, otherwise a wrong-token caller could still
+        // cause a queue drain.
+        return actix_web::HttpResponse::Unauthorized().finish();
+    }
+    drop(clients);
+
+    let mut queues = unwrap_data!(data.apq_queues.lock());
+    let envelopes = queues.remove(&id).unwrap_or_default();
+    let resp = RecvApqMessagesResponse { envelopes };
+    match resp.tls_serialize_detached() {
+        Ok(out) => actix_web::HttpResponse::Ok().body(out),
+        Err(_) => actix_web::HttpResponse::InternalServerError().finish(),
+    }
+}
+
 // === Main function driving the DS ===
 
 #[actix_web::main]
@@ -451,6 +648,9 @@ async fn main() -> std::io::Result<()> {
             .service(send_welcome)
             .service(msg_recv)
             .service(msg_send)
+            .service(apq_publish)
+            .service(apq_publish_pair)
+            .service(apq_recv)
             .service(reset)
     })
     .bind(addr)?

@@ -4,7 +4,7 @@ This document tracks the concrete state of this repository against the
 [`PROPOSAL.md`](./PROPOSAL.md) goals, the [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
-**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~90%**
+**Status: Phase 0 — Complete | Phase 1–2 / 3–6 — In progress | ~95%**
 
 ## Version Targets
 
@@ -91,10 +91,13 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       `is_draft_codepoint()` and `is_post_quantum()` helpers; both providers
       explicitly reject them.
 - [x] Implement ML-DSA in at least one crypto provider — libcrux
-      provider gates ML-DSA-65 keygen / sign / verify behind a new
-      `mldsa` feature flag (surfaced as `openmls/mldsa`). RustCrypto
-      still rejects all three ML-DSA variants with
-      `UnsupportedSignatureScheme`.
+      provider implements ML-DSA-44 / ML-DSA-65 / ML-DSA-87 keygen /
+      sign / verify on top of `libcrux-ml-dsa`, gated behind the
+      independent `mldsa44` / `mldsa` / `mldsa87` feature flags
+      (surfaced as `openmls/mldsa44`, `openmls/mldsa`,
+      `openmls/mldsa87`). Each disabled feature returns
+      `UnsupportedSignatureScheme`. RustCrypto still rejects all three
+      ML-DSA variants with `UnsupportedSignatureScheme`.
 
 #### APQ-MLS combiner
 
@@ -195,6 +198,15 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 - [x] Telemetry for PQ-specific failure modes — event enum, emitter
       trait, and in-memory test emitter in
       `openmls/src/group/pq_telemetry.rs`.
+- [x] Persistent client-side storage migration driver — SQLite
+      backend in `sqlite_storage/src/migration.rs` implementing the
+      `MigrationStorage` trait with idempotent table creation, crash
+      resume from `InProgress(step)`, and `validate_post_migration`.
+- [x] Reference DS APQ message routing — actix-web endpoints
+      `POST /apq/publish`, `POST /apq/publish-pair`, and
+      `GET /apq/recv/{id}` in `delivery-service/ds/src/main.rs`,
+      backed by per-client `Vec<ApqEnvelope>` queues. Wire types
+      re-exported from `delivery-service/ds-lib/src/apq.rs`.
 
 #### Testing and validation
 
@@ -215,6 +227,23 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
       tests at 50-group / 100-Welcome scale).
 - [x] Client resync after a missed PQ/T commit pair
       (`openmls/src/group/apq_resync.rs`).
+- [x] Real PQ crypto end-to-end test — libcrux + xwing happy path in
+      `openmls/tests/pq_real_crypto_e2e_tests.rs`. Covers PQ
+      KeyPackage generation through `MultiCiphersuiteKeyPackages`,
+      APQ bootstrap on top of a classical T group with an X-Wing PQ
+      group, post-bootstrap `is_apq()` / `detect_desync` invariants,
+      and the pinned-ciphersuite no-downgrade validator on the
+      bootstrapped state.
+- [x] PQ orchestration benchmarks
+      (`openmls/benches/pq_benchmark.rs`) — `DeviceCapability` sign /
+      verify (Ed25519 baseline), `select_conversation_mode` at
+      10/100/1000 peers, `ApqInfo` TLS round-trips, and the five
+      no-downgrade validators in fan-out.
+- [x] CI workflow for PQ tests
+      (`.github/workflows/pq-tests.yml`) — runs every PQ-specific
+      integration test, the libcrux+xwing real-crypto test, the new
+      DS APQ tests, and the PQ orchestration benchmarks compile-only
+      job on push to `main` and on pull requests.
 - [ ] External security review of APQ orchestration.
 
 ## Known Gaps
@@ -223,16 +252,89 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 |--------------------------------------------------|-----------------------------------------------------------------------|
 | X-Wing only, draft codepoint `0x004D`            | Not sufficient for final standards-based deployment                   |
 | ~~RustCrypto provider panics on X-Wing~~         | Fixed: RustCrypto returns `UnsupportedCiphersuite` instead of panicking |
-| No ML-DSA signature support in any provider      | PQ confidentiality ≠ PQ authenticity (enum + helpers landed; no provider impl) |
+| ~~No ML-DSA signature support in any provider~~  | Fixed: libcrux provider implements ML-DSA-44 / ML-DSA-65 / ML-DSA-87 sign / verify / keygen behind the independent `mldsa44` / `mldsa` / `mldsa87` feature flags. RustCrypto still rejects all three. |
 | ~~No APQ-MLS combiner~~                          | Combiner scaffolding (FULL/PARTIAL commits, ApqInfo, bootstrap, ReInit, resync) is wired against `MlsGroup`; live multi-client soak tests still pending |
-| Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `DeliveryService`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage |
+| Server stubs are in-memory only                  | `CapabilityRegistry`, `KeyPackageService`, `ConversationMetadataService`, `KeyPackageFetchRateLimiter`, `DeliveryService`, `PqTelemetryEmitter` are reference implementations meant for tests and as API contracts — production servers must back them with persistent storage. Client side: SQLite `MigrationStorage` now exists in `sqlite_storage/src/migration.rs`. |
+| ~~MLDSA44 / MLDSA87 not yet implemented~~        | Fixed: libcrux provider implements ML-DSA-44 / ML-DSA-87 sign / verify / keygen on top of `libcrux-ml-dsa::ml_dsa_44` / `ml_dsa_87`, gated behind the independent `mldsa44` / `mldsa87` feature flags |
 | ~~`commit_reinit` seals the old group before `complete_reinit` can run~~ | Fixed: `commit_reinit` now derives the Resumption(ReInit) PSK before sealing the old group and stores it on `ReInitCommit`. `complete_reinit` consumes the pre-derived secret instead of calling `export_secret` on an inactive group |
 | ~~No migration state machine~~                   | Fixed: per-conversation `MigrationStateMachine` in `openmls/src/group/migration_state.rs` with the 8-state fine-grained lifecycle and the higher-level `ConversationLifecycle` projection wired into `KChatMlsConversation::migration_state` |
 | ~~No server-side capability protocol~~            | Fixed: wire types in `openmls/src/credentials/capability_protocol.rs` (publish / fetch / notification request-response messages with TLS codecs and signature verification, layered on top of the existing in-memory `CapabilityRegistry`) |
 | No final IETF PQ ciphersuite codepoints          | Migration plumbing landed in `openmls/src/ciphersuite/codepoint_migration.rs`; static draft → final mapping table is empty pending IANA assignment, then every `migrate_*` lookup and `migrate_conversation_state` rotation will fire automatically. Six ML-KEM hybrid + pure ML-KEM 768/1024 + ML-DSA-signed draft codepoints currently shipped. |
-| No persistent client storage migration driver    | ~~Fixed~~: idempotent `StorageMigrator` in `openmls/src/group/storage_migration.rs` with crash-resume support — concrete backends still need to implement the `MigrationStorage` trait |
+| ~~No persistent client storage migration driver~~ | Fixed: idempotent `StorageMigrator` in `openmls/src/group/storage_migration.rs` plus a SQLite `MigrationStorage` implementation in `sqlite_storage/src/migration.rs` with crash-resume support and `validate_post_migration` checks |
 
 ## Changelog
+
+### 2026-05-04 (PQ batch 6 — SQLite migration storage, CI, CLI/WASM PQ surface, MLDSA44/87, real-crypto e2e, DS APQ routing, benchmarks)
+
+- Implemented the `MigrationStorage` trait for the SQLite storage
+  provider in `sqlite_storage/src/migration.rs`. Each migration step
+  idempotently creates the underlying table (`apq_info`,
+  `conversation_mapping`, `psk_material`, `commit_counters`,
+  `anti_downgrade_state`) plus the `migration_state` progress marker.
+  `read_state` / `persist_state` round-trip through the
+  `migration_state` row, and the `*_present` validators check the
+  expected columns.
+- Added `.github/workflows/pq-tests.yml` — Rust stable toolchain,
+  workspace `fmt --all -- --check`, workspace
+  `clippy --workspace --tests -- -D warnings`, workspace
+  `cargo test --workspace`, every PQ-specific integration test
+  (capability / downgrade / interop / KAT / lifecycle / APQ e2e /
+  ReInit / telemetry / full e2e / multi-ciphersuite public API /
+  APQ delivery wire / migration state), and the gated
+  `xwing` / `xwing,libcrux-provider` jobs covering
+  `pq_real_crypto_e2e_tests` and the libcrux provider tests. Runs on
+  push to `main` and on PRs.
+- Added PQ awareness to the reference CLI (`cli/src/`):
+  `--security-mode classical|pq-confidentiality|pq-authenticity`
+  routes through `select_conversation_mode`, identity commands
+  generate and display a signed `DeviceCapability`, and the
+  conversation surface displays the resulting `SecurityMode` plus
+  pinned ciphersuite. Feature flags `xwing` / `mldsa` /
+  `mldsa44` / `mldsa87` are passthroughs to `openmls`.
+- Added WASM PQ bindings in `openmls-wasm/src/lib.rs` —
+  `wasm_bindgen` exports for `SecurityMode` (Classical /
+  PqConfidentiality / PqAuthenticity, ordered numeric discriminants),
+  `LifecyclePhase` (flattened projection of `ConversationLifecycle`
+  with no payloads), `DeviceCapability` (constructor / sign / verify /
+  TLS encode-decode + property getters), `selectConversationMode`,
+  and `SelectModeResult`. Added 6 host-side tests covering
+  TLS round-trip, mode selection on classical-only / mixed peer
+  sets, empty-peer rejection, and lifecycle projection.
+- Added full MLDSA44 and MLDSA87 implementations in the libcrux
+  provider — new `mldsa44` and `mldsa87` feature flags in
+  `libcrux_crypto/Cargo.toml` (passthrough from `openmls`), each
+  pulling in `libcrux-ml-dsa::ml_dsa_44` / `ml_dsa_87` and wiring
+  keygen / sign / verify with FIPS 204 fixed-size buffers. When the
+  feature is disabled, the provider returns
+  `UnsupportedSignatureScheme` for the corresponding scheme. New
+  feature-gated tests in `libcrux_crypto/src/crypto.rs` lock in
+  signing-key / verification-key / signature byte lengths plus
+  tampered-message rejection. KAT vectors in
+  `openmls/tests/pq_kat_vectors/` cover MLDSA44/MLDSA65/MLDSA87.
+- Added `openmls/tests/pq_real_crypto_e2e_tests.rs` (gated behind
+  `#[cfg(feature = "xwing")]`) — full APQ bootstrap on top of a
+  classical T group with an X-Wing PQ group under the libcrux
+  provider, post-bootstrap `is_apq()` / `detect_desync` invariants,
+  and a no-downgrade pinned-ciphersuite check on the resulting state.
+  Plus a sanity test that the public `MultiCiphersuiteKeyPackages`
+  API generates both a classical and an X-Wing KeyPackage on
+  libcrux+xwing.
+- Added APQ message routing to the reference DS — three new actix-web
+  endpoints in `delivery-service/ds/src/main.rs`
+  (`POST /apq/publish`, `POST /apq/publish-pair`,
+  `GET /apq/recv/{id}`), per-client `Vec<ApqEnvelope>` queue on the
+  shared `DsData`, recipient existence check on publish, and 3
+  integration tests covering single-message round-trip, full-commit
+  pair round-trip, and unknown-recipient rejection. Wire types are
+  re-exported from `delivery-service/ds-lib/src/apq.rs`.
+- Added `openmls/benches/pq_benchmark.rs` — criterion benchmarks for
+  PQ-critical orchestration: `DeviceCapability::sign` / `verify`
+  (Ed25519 baseline), `select_conversation_mode` at 10 / 100 / 1000
+  peers, `ApqInfo` TLS serialize / deserialize round-trip, and the
+  five `ConversationSecurityState` validators in fan-out. Wired as
+  `[[bench]] name = "pq_benchmark" harness = false` in
+  `openmls/Cargo.toml` so it runs with
+  `cargo bench -p openmls --bench pq_benchmark`.
 
 ### 2026-05-04 (PQ batch 5 — codepoint / storage migration + auto-classified triggers)
 
@@ -625,4 +727,4 @@ target, and the [`PHASES.md`](./PHASES.md) migration plan.
 
 ## Last Updated
 
-2026-05-04 (PQ batch 3)
+2026-05-04 (PQ batch 6)

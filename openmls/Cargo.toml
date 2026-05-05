@@ -74,6 +74,12 @@ xwing = ["libcrux-provider", "openmls_libcrux_crypto?/xwing"]
 # range and ML-DSA keys/signatures are materially larger than
 # classical Ed25519.
 mldsa = ["libcrux-provider", "openmls_libcrux_crypto?/mldsa"]
+# Enable ML-DSA-44 (FIPS 204) signatures via the libcrux provider.
+# Independent feature flag from `mldsa` (ML-DSA-65) so a consumer can
+# pick exactly the parameter set their device supports.
+mldsa44 = ["libcrux-provider", "openmls_libcrux_crypto?/mldsa44"]
+# Enable ML-DSA-87 (FIPS 204) signatures via the libcrux provider.
+mldsa87 = ["libcrux-provider", "openmls_libcrux_crypto?/mldsa87"]
 sqlite-provider = [
     "dep:openmls_sqlite_storage",
     "openmls_test?/sqlite-provider",
@@ -144,6 +150,10 @@ openmls = { path = ".", features = ["test-utils"] }
 
 [[bench]]
 name = "benchmark"
+harness = false
+
+[[bench]]
+name = "pq_benchmark"
 harness = false
 
 [package.metadata.docs.rs]

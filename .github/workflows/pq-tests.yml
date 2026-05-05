@@ -1,0 +1,150 @@
+name: PQ tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy (matches CI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install protoc (interop_client build dep)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo clippy \
+            -p openmls --tests --benches --examples \
+            -p openmls_basic_credential \
+            -p cli \
+            -p interop_client \
+            -p mls-ds \
+            -p ds-lib \
+            -p openmls_libcrux_crypto \
+            -p openmls_memory_storage \
+            -p openmls_rust_crypto \
+            -p openmls_test \
+            -p openmls-wasm \
+            -p openmls_traits \
+            -- -D warnings
+
+  test-classical:
+    name: cargo test (whole workspace, classical)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (interop_client build dep)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --no-fail-fast
+
+  test-pq:
+    name: cargo test (PQ integration tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          set -e
+          for t in \
+            pq_capability_tests \
+            pq_downgrade_tests \
+            pq_interop_tests \
+            pq_kat_tests \
+            pq_lifecycle_tests \
+            pq_apq_e2e_tests \
+            pq_reinit_e2e_tests \
+            pq_telemetry_integration_tests \
+            pq_full_e2e_tests \
+            multi_ciphersuite_public_api \
+            pq_apq_delivery_wire_tests \
+            pq_migration_state_tests
+          do
+            echo "=== running $t ==="
+            cargo test -p openmls --test "$t"
+          done
+
+  test-libcrux-xwing:
+    name: cargo test -p openmls_libcrux_crypto (with and without xwing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo test -p openmls_libcrux_crypto
+          cargo test -p openmls_libcrux_crypto --features xwing
+
+  test-real-crypto-e2e:
+    name: cargo test pq_real_crypto_e2e_tests (libcrux + xwing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo test -p openmls --features xwing,libcrux-provider \
+            --test pq_real_crypto_e2e_tests
+
+  test-ds-apq:
+    name: cargo test -p mls-ds (APQ delivery endpoints)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p mls-ds
+
+  test-sqlite-migration:
+    name: cargo test -p openmls_sqlite_storage (MigrationStorage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p openmls_sqlite_storage
+
+  bench-compile:
+    name: cargo bench --no-run -p openmls --bench pq_benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench -p openmls --bench pq_benchmark --no-run
+
+  load-tests:
+    name: PQ load tests (ignored)
+    runs-on: ubuntu-latest
+    # Don't gate the merge on the load tests — they're slow and live
+    # in `#[ignore]`d functions. Run them on a separate optional job
+    # so failures surface but don't block.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo test -p openmls --test pq_load_tests -- --ignored --nocapture
+          cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored --nocapture

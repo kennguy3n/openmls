@@ -332,6 +332,193 @@ impl<'a, S: MigrationStorage + ?Sized> StorageMigrator<'a, S> {
     }
 }
 
+/// Bridge implementation that wires
+/// [`openmls_sqlite_storage::SqliteMigrationStorage`] into the
+/// [`MigrationStorage`] trait.
+///
+/// Only available when the `sqlite-provider` feature is enabled. The
+/// SQL itself lives in the `openmls_sqlite_storage` crate (so it can be
+/// used standalone); this module just glues the rusqlite-typed methods
+/// onto the trait surface that the [`StorageMigrator`] driver expects.
+#[cfg(feature = "sqlite-provider")]
+mod sqlite_bridge {
+    use std::borrow::Borrow;
+
+    use openmls_sqlite_storage::{
+        Connection, MigrationStateRow, MigrationStepRow, SqliteMigrationStorage,
+    };
+
+    use super::{MigrationStep, MigrationStorage, StorageMigrationState};
+
+    impl From<MigrationStep> for MigrationStepRow {
+        fn from(step: MigrationStep) -> Self {
+            match step {
+                MigrationStep::MigrateGroupState => MigrationStepRow::MigrateGroupState,
+                MigrationStep::MigrateApqInfo => MigrationStepRow::MigrateApqInfo,
+                MigrationStep::MigrateConversationMapping => {
+                    MigrationStepRow::MigrateConversationMapping
+                }
+                MigrationStep::MigratePskMaterial => MigrationStepRow::MigratePskMaterial,
+                MigrationStep::MigrateCommitCounters => MigrationStepRow::MigrateCommitCounters,
+                MigrationStep::MigrateAntiDowngradeState => {
+                    MigrationStepRow::MigrateAntiDowngradeState
+                }
+            }
+        }
+    }
+
+    impl From<MigrationStepRow> for MigrationStep {
+        fn from(step: MigrationStepRow) -> Self {
+            match step {
+                MigrationStepRow::MigrateGroupState => MigrationStep::MigrateGroupState,
+                MigrationStepRow::MigrateApqInfo => MigrationStep::MigrateApqInfo,
+                MigrationStepRow::MigrateConversationMapping => {
+                    MigrationStep::MigrateConversationMapping
+                }
+                MigrationStepRow::MigratePskMaterial => MigrationStep::MigratePskMaterial,
+                MigrationStepRow::MigrateCommitCounters => MigrationStep::MigrateCommitCounters,
+                MigrationStepRow::MigrateAntiDowngradeState => {
+                    MigrationStep::MigrateAntiDowngradeState
+                }
+            }
+        }
+    }
+
+    impl From<MigrationStateRow> for StorageMigrationState {
+        fn from(state: MigrationStateRow) -> Self {
+            match state {
+                MigrationStateRow::NotStarted => StorageMigrationState::NotStarted,
+                MigrationStateRow::InProgress(step) => {
+                    StorageMigrationState::InProgress(step.into())
+                }
+                MigrationStateRow::Complete => StorageMigrationState::Complete,
+                MigrationStateRow::Failed(reason) => StorageMigrationState::Failed(reason),
+            }
+        }
+    }
+
+    impl From<&StorageMigrationState> for MigrationStateRow {
+        fn from(state: &StorageMigrationState) -> Self {
+            match state {
+                StorageMigrationState::NotStarted => MigrationStateRow::NotStarted,
+                StorageMigrationState::InProgress(step) => {
+                    MigrationStateRow::InProgress((*step).into())
+                }
+                StorageMigrationState::Complete => MigrationStateRow::Complete,
+                StorageMigrationState::Failed(reason) => MigrationStateRow::Failed(reason.clone()),
+            }
+        }
+    }
+
+    impl<C: Borrow<Connection>> MigrationStorage for SqliteMigrationStorage<C> {
+        fn read_state(&self) -> StorageMigrationState {
+            SqliteMigrationStorage::read_state(self)
+                .map(StorageMigrationState::from)
+                .unwrap_or_else(|_| StorageMigrationState::NotStarted)
+        }
+
+        fn persist_state(&mut self, state: &StorageMigrationState) -> Result<(), String> {
+            SqliteMigrationStorage::persist_state(self, &MigrationStateRow::from(state))
+                .map_err(|e| e.to_string())
+        }
+
+        fn migrate_group_state(&mut self) -> Result<(), String> {
+            SqliteMigrationStorage::migrate_group_state(self).map_err(|e| e.to_string())
+        }
+        fn migrate_apq_info(&mut self) -> Result<(), String> {
+            SqliteMigrationStorage::migrate_apq_info(self).map_err(|e| e.to_string())
+        }
+        fn migrate_conversation_mapping(&mut self) -> Result<(), String> {
+            SqliteMigrationStorage::migrate_conversation_mapping(self).map_err(|e| e.to_string())
+        }
+        fn migrate_psk_material(&mut self) -> Result<(), String> {
+            SqliteMigrationStorage::migrate_psk_material(self).map_err(|e| e.to_string())
+        }
+        fn migrate_commit_counters(&mut self) -> Result<(), String> {
+            SqliteMigrationStorage::migrate_commit_counters(self).map_err(|e| e.to_string())
+        }
+        fn migrate_anti_downgrade_state(&mut self) -> Result<(), String> {
+            SqliteMigrationStorage::migrate_anti_downgrade_state(self).map_err(|e| e.to_string())
+        }
+
+        fn group_state_present(&self) -> bool {
+            SqliteMigrationStorage::group_state_present(self)
+        }
+        fn apq_info_present(&self) -> bool {
+            SqliteMigrationStorage::apq_info_present(self)
+        }
+        fn conversation_mapping_present(&self) -> bool {
+            SqliteMigrationStorage::conversation_mapping_present(self)
+        }
+        fn psk_material_present(&self) -> bool {
+            SqliteMigrationStorage::psk_material_present(self)
+        }
+        fn commit_counters_present(&self) -> bool {
+            SqliteMigrationStorage::commit_counters_present(self)
+        }
+        fn anti_downgrade_state_present(&self) -> bool {
+            SqliteMigrationStorage::anti_downgrade_state_present(self)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::group::storage_migration::StorageMigrator;
+
+        fn fresh_store() -> SqliteMigrationStorage<Connection> {
+            let conn = Connection::open_in_memory().expect("open in-memory db");
+            SqliteMigrationStorage::new(conn).expect("ensure tables")
+        }
+
+        #[test]
+        fn sqlite_bridge_drives_full_migration() {
+            let mut store = fresh_store();
+            let mut migrator = StorageMigrator::new(&mut store);
+            migrator
+                .run_migration()
+                .expect("sqlite-backed migration must succeed");
+            migrator
+                .validate_post_migration()
+                .expect("post-migration validation must pass");
+        }
+
+        #[test]
+        fn sqlite_bridge_resumes_from_in_progress() {
+            let mut store = fresh_store();
+            // Pretend a previous run already completed every step
+            // before MigratePskMaterial — their on-disk schema would
+            // be in place after a crash mid-migration.
+            store.migrate_group_state().unwrap();
+            store.migrate_apq_info().unwrap();
+            store.migrate_conversation_mapping().unwrap();
+            // Simulate a crash midway through the plan.
+            MigrationStorage::persist_state(
+                &mut store,
+                &StorageMigrationState::InProgress(MigrationStep::MigratePskMaterial),
+            )
+            .expect("persist InProgress");
+            // Driver should resume from that step and finish.
+            let mut migrator = StorageMigrator::new(&mut store);
+            migrator.run_migration().expect("resume must succeed");
+            migrator
+                .validate_post_migration()
+                .expect("post-migration validation must pass");
+        }
+
+        #[test]
+        fn sqlite_bridge_idempotent_double_run() {
+            let mut store = fresh_store();
+            StorageMigrator::new(&mut store)
+                .run_migration()
+                .expect("first run");
+            StorageMigrator::new(&mut store)
+                .run_migration()
+                .expect("second run must be a no-op");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

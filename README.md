@@ -102,6 +102,19 @@ cargo test -p openmls --test multi_ciphersuite_public_api
 cargo test -p openmls --test pq_apq_delivery_wire_tests
 cargo test -p openmls --test pq_migration_state_tests
 
+# Real-crypto APQ end-to-end (libcrux + xwing).
+cargo test -p openmls --features xwing,libcrux-provider \
+    --test pq_real_crypto_e2e_tests
+
+# Reference DS APQ message routing.
+cargo test -p mls-ds
+
+# SQLite `MigrationStorage` integration tests.
+cargo test -p openmls_sqlite_storage
+
+# PQ orchestration benchmarks.
+cargo bench -p openmls --bench pq_benchmark
+
 # High-scale load tests are gated behind `#[ignore]`; opt in with --ignored.
 cargo test -p openmls --test pq_load_tests          -- --ignored
 cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored
@@ -110,6 +123,9 @@ cargo test -p openmls --test pq_welcome_fanout_tests -- --ignored
 cargo fmt --all -- --check
 cargo clippy --workspace --tests -- -D warnings
 ```
+
+CI runs every command above on push to `main` and on pull requests via
+[`.github/workflows/pq-tests.yml`](./.github/workflows/pq-tests.yml).
 
 ## Documentation index
 
@@ -239,7 +255,23 @@ and `messages` modules respectively.
   and `StorageMigrator` is the driver that runs each step
   check-before-write, persists progress between steps, and resumes
   cleanly from the marker on the next start. Concrete backends plug
-  in via the `MigrationStorage` trait.
+  in via the `MigrationStorage` trait. The canonical SQLite
+  implementation lives in
+  [`sqlite_storage::migration`](./sqlite_storage/src/migration.rs).
+- Reference Delivery Service APQ endpoints
+  ([`delivery-service/ds/src/main.rs`](./delivery-service/ds/src/main.rs))
+  — `POST /apq/publish`, `POST /apq/publish-pair`, and
+  `GET /apq/recv/{id}` route `ApqEnvelope` payloads to a per-client
+  in-memory queue for the actix-web reference DS binary.
+- CLI / WASM PQ surface — the `cli/` and `openmls-wasm/` crates now
+  expose `SecurityMode`, `DeviceCapability`, `select_conversation_mode`,
+  and the `LifecyclePhase` projection so end-to-end PQ flows can be
+  driven from the CLI and from the browser without going through
+  unstable internal types.
+- PQ benchmarks — [`openmls/benches/pq_benchmark.rs`](./openmls/benches/pq_benchmark.rs)
+  ships criterion benches for `DeviceCapability::sign` / `verify`,
+  `select_conversation_mode` at 10 / 100 / 1000 peers, `ApqInfo` TLS
+  round-trip, and the `ConversationSecurityState` validators.
 - [`group::apq_commit::auto_classify_commit_type`](./openmls/src/group/apq_commit.rs)
   — Phase 5 trigger auto-classification.
   `detect_external_join` / `detect_credential_rotation` walk a

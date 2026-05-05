@@ -2,9 +2,13 @@ mod utils;
 
 use js_sys::Uint8Array;
 use openmls::{
-    credentials::{BasicCredential, CredentialWithKey},
+    ciphersuite::security_mode::SecurityMode as InnerSecurityMode,
+    credentials::{BasicCredential, CredentialWithKey, DeviceCapability as InnerDeviceCapability},
     framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut},
-    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
+    group::{
+        select_conversation_mode as inner_select_conversation_mode, ConversationLifecycle, GroupId,
+        MlsGroup, MlsGroupJoinConfig, StagedWelcome,
+    },
     key_packages::KeyPackage as OpenMlsKeyPackage,
     prelude::SignatureScheme,
     treesync::RatchetTreeIn,
@@ -308,10 +312,13 @@ impl Group {
     }
 
     fn native_join(provider: &Provider, mut welcome: &[u8], ratchet_tree: RatchetTree) -> Group {
-        let welcome = MlsMessageIn::tls_deserialize(&mut welcome)
+        let welcome = match MlsMessageIn::tls_deserialize(&mut welcome)
             .unwrap()
-            .into_welcome()
-            .expect("expected a message of type welcome");
+            .extract()
+        {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            other => panic!("expected a message of type welcome, got {other:?}"),
+        };
         let config = MlsGroupJoinConfig::builder().build();
         let mls_group = StagedWelcome::new_from_welcome(
             provider.as_ref(),
@@ -394,6 +401,276 @@ fn mls_message_to_uint8array(msg: &MlsMessageOut) -> Uint8Array {
     msg.tls_serialize(&mut serialized).unwrap();
 
     unsafe { Uint8Array::new(&Uint8Array::view(&serialized)) }
+}
+
+// =============================================================================
+// PQ orchestration bindings (KChat layer)
+// =============================================================================
+//
+// These types mirror the Rust-side `SecurityMode`, `ConversationLifecycle`,
+// and `DeviceCapability` so a JS/wasm caller can drive the PQ orchestration
+// from the browser. The mapping is intentionally one-way (Rust enums →
+// `#[wasm_bindgen]` enums) so we don't have to keep the discriminants in
+// sync by hand.
+
+/// Mirror of [`openmls::ciphersuite::security_mode::SecurityMode`].
+///
+/// Variants are ordered so JS code can compare numerically:
+/// `Classical < PqConfidentiality < PqAuthenticity`.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityMode {
+    Classical = 0,
+    PqConfidentiality = 1,
+    PqAuthenticity = 2,
+}
+
+impl From<InnerSecurityMode> for SecurityMode {
+    fn from(m: InnerSecurityMode) -> Self {
+        match m {
+            InnerSecurityMode::Classical => SecurityMode::Classical,
+            InnerSecurityMode::PqConfidentiality => SecurityMode::PqConfidentiality,
+            InnerSecurityMode::PqAuthenticity => SecurityMode::PqAuthenticity,
+        }
+    }
+}
+
+/// Mirror of [`openmls::group::ConversationLifecycle`], flattened so it can
+/// cross the wasm-bindgen boundary as a C-style enum. `Failed` discards
+/// the carried reason because `wasm_bindgen` does not support enum
+/// variants with payloads — JS callers interested in the reason should
+/// fall back to the underlying state machine through a future binding.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecyclePhase {
+    Classical = 0,
+    UpgradeEligible = 1,
+    UpgradeProposed = 2,
+    UpgradeInProgress = 3,
+    PqActive = 4,
+    ApqBootstrapping = 5,
+    ApqActive = 6,
+    Failed = 7,
+}
+
+impl From<&ConversationLifecycle> for LifecyclePhase {
+    fn from(l: &ConversationLifecycle) -> Self {
+        match l {
+            ConversationLifecycle::Classical => LifecyclePhase::Classical,
+            ConversationLifecycle::UpgradeEligible => LifecyclePhase::UpgradeEligible,
+            ConversationLifecycle::UpgradeProposed => LifecyclePhase::UpgradeProposed,
+            ConversationLifecycle::UpgradeInProgress => LifecyclePhase::UpgradeInProgress,
+            ConversationLifecycle::PqActive => LifecyclePhase::PqActive,
+            ConversationLifecycle::ApqBootstrapping => LifecyclePhase::ApqBootstrapping,
+            ConversationLifecycle::ApqActive => LifecyclePhase::ApqActive,
+            ConversationLifecycle::Failed(_) => LifecyclePhase::Failed,
+        }
+    }
+}
+
+/// JS-facing wrapper around [`openmls::credentials::DeviceCapability`].
+///
+/// Constructors and accessors mirror the Rust struct one-for-one. The
+/// inner blob is owned and only handed back to JS as a serialized
+/// payload (`tls_encode`) — JS is not expected to manipulate the
+/// fields directly.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct DeviceCapability {
+    inner: InnerDeviceCapability,
+}
+
+#[wasm_bindgen]
+impl DeviceCapability {
+    /// Construct a new, **unsigned** capability. `classical_ciphersuites`
+    /// and `pq_ciphersuites` are passed as JS arrays of `u16` codepoints.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        mls_version: u16,
+        classical_ciphersuites: Vec<u16>,
+        pq_ciphersuites: Vec<u16>,
+        apq_supported: bool,
+        pq_auth_supported: bool,
+        provider_id: String,
+    ) -> Result<DeviceCapability, JsError> {
+        let classical = classical_ciphersuites
+            .into_iter()
+            .map(|cs| {
+                Ciphersuite::try_from(cs).map_err(|e| {
+                    JsError::new(&format!("invalid classical ciphersuite codepoint: {e:?}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let pq = pq_ciphersuites
+            .into_iter()
+            .map(|cs| {
+                Ciphersuite::try_from(cs)
+                    .map_err(|e| JsError::new(&format!("invalid pq ciphersuite codepoint: {e:?}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(DeviceCapability {
+            inner: InnerDeviceCapability::new(
+                mls_version,
+                classical,
+                pq,
+                apq_supported,
+                pq_auth_supported,
+                provider_id,
+            ),
+        })
+    }
+
+    /// `true` iff the capability has been signed.
+    #[wasm_bindgen(js_name = isSigned)]
+    pub fn is_signed(&self) -> bool {
+        self.inner.is_signed()
+    }
+
+    #[wasm_bindgen(getter, js_name = mlsVersion)]
+    pub fn mls_version(&self) -> u16 {
+        self.inner.mls_version
+    }
+
+    #[wasm_bindgen(getter, js_name = providerId)]
+    pub fn provider_id(&self) -> String {
+        self.inner.provider_id.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = apqSupported)]
+    pub fn apq_supported(&self) -> bool {
+        self.inner.apq_supported
+    }
+
+    #[wasm_bindgen(getter, js_name = pqAuthSupported)]
+    pub fn pq_auth_supported(&self) -> bool {
+        self.inner.pq_auth_supported
+    }
+
+    /// Returns the classical ciphersuite codepoints as a `Vec<u16>`.
+    #[wasm_bindgen(getter, js_name = classicalCiphersuites)]
+    pub fn classical_ciphersuites(&self) -> Vec<u16> {
+        self.inner
+            .classical_ciphersuites
+            .iter()
+            .map(|cs| u16::from(*cs))
+            .collect()
+    }
+
+    /// Returns the PQ ciphersuite codepoints as a `Vec<u16>`.
+    #[wasm_bindgen(getter, js_name = pqCiphersuites)]
+    pub fn pq_ciphersuites(&self) -> Vec<u16> {
+        self.inner
+            .pq_ciphersuites
+            .iter()
+            .map(|cs| u16::from(*cs))
+            .collect()
+    }
+
+    /// Sign the capability with `signing_key` under `signature_scheme`
+    /// (the `u16` codepoint, e.g. `0x0807` for Ed25519). Updates the
+    /// capability in place. The signing key is the raw private key
+    /// bytes the device's identity keypair produced.
+    pub fn sign(
+        &mut self,
+        signature_scheme: u16,
+        signing_key: &[u8],
+        provider: &Provider,
+    ) -> Result<(), JsError> {
+        let scheme = SignatureScheme::try_from(signature_scheme)
+            .map_err(|e| JsError::new(&format!("invalid signature scheme codepoint: {e:?}")))?;
+        self.inner
+            .sign(scheme, signing_key, provider.0.crypto())
+            .map_err(|e| JsError::new(&format!("DeviceCapability::sign failed: {e:?}")))
+    }
+
+    /// Verify the capability's signature against `public_key` under
+    /// `signature_scheme`. Returns an error if the signature is
+    /// missing, malformed, or does not match the recomputed payload.
+    pub fn verify(
+        &self,
+        signature_scheme: u16,
+        public_key: &[u8],
+        provider: &Provider,
+    ) -> Result<(), JsError> {
+        let scheme = SignatureScheme::try_from(signature_scheme)
+            .map_err(|e| JsError::new(&format!("invalid signature scheme codepoint: {e:?}")))?;
+        self.inner
+            .verify(scheme, public_key, provider.0.crypto())
+            .map_err(|e| JsError::new(&format!("DeviceCapability::verify failed: {e:?}")))
+    }
+
+    /// TLS-encode the full capability (including signature) for
+    /// transport over the wire. Mirrors the Rust-side `tls_serialize`.
+    #[wasm_bindgen(js_name = tlsEncode)]
+    pub fn tls_encode(&self) -> Result<Vec<u8>, JsError> {
+        let mut buf = Vec::new();
+        self.inner
+            .tls_serialize(&mut buf)
+            .map_err(|e| JsError::new(&format!("tls_serialize: {e:?}")))?;
+        Ok(buf)
+    }
+
+    /// TLS-decode a capability blob back into a JS-facing
+    /// [`DeviceCapability`]. Inverse of [`Self::tls_encode`].
+    #[wasm_bindgen(js_name = tlsDecode)]
+    pub fn tls_decode(mut bytes: &[u8]) -> Result<DeviceCapability, JsError> {
+        let inner = InnerDeviceCapability::tls_deserialize(&mut bytes)
+            .map_err(|e| JsError::new(&format!("tls_deserialize: {e:?}")))?;
+        Ok(DeviceCapability { inner })
+    }
+}
+
+/// Result of [`select_conversation_mode`] suitable for crossing the
+/// wasm-bindgen boundary. `ciphersuite` is the chosen MLS codepoint.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub struct SelectModeResult {
+    mode: SecurityMode,
+    ciphersuite: u16,
+}
+
+#[wasm_bindgen]
+impl SelectModeResult {
+    #[wasm_bindgen(getter)]
+    pub fn mode(&self) -> SecurityMode {
+        self.mode
+    }
+    #[wasm_bindgen(getter)]
+    pub fn ciphersuite(&self) -> u16 {
+        self.ciphersuite
+    }
+}
+
+/// Inner non-wasm helper: lifts the empty-list / openmls error cases
+/// to a String so the wasm-bindgen wrapper can box them as `JsError`
+/// while host-side tests can compare them as plain strings without
+/// pulling in JS bindings.
+fn select_conversation_mode_inner(
+    peer_capabilities: &[DeviceCapability],
+) -> Result<SelectModeResult, String> {
+    if peer_capabilities.is_empty() {
+        return Err("selectConversationMode requires at least one peer capability".to_string());
+    }
+    let inner_caps: Vec<&InnerDeviceCapability> =
+        peer_capabilities.iter().map(|c| &c.inner).collect();
+    let (mode, cs) = inner_select_conversation_mode(&inner_caps)
+        .map_err(|e| format!("select_conversation_mode: {e:?}"))?;
+    Ok(SelectModeResult {
+        mode: mode.into(),
+        ciphersuite: u16::from(cs),
+    })
+}
+
+/// Pick the highest [`SecurityMode`] all peers support and the best
+/// shared ciphersuite for that mode. Wraps
+/// [`openmls::group::select_conversation_mode`].
+///
+/// `peer_capabilities` is a JS array of `DeviceCapability` clones.
+#[wasm_bindgen(js_name = selectConversationMode)]
+pub fn select_conversation_mode(
+    peer_capabilities: Vec<DeviceCapability>,
+) -> Result<SelectModeResult, JsError> {
+    select_conversation_mode_inner(&peer_capabilities).map_err(|e| JsError::new(&e))
 }
 
 #[cfg(test)]
@@ -487,5 +764,81 @@ mod tests {
             .unwrap();
 
         assert_eq!(alice_msg, bob_msg);
+    }
+
+    // -----------------------------------------------------------------
+    // PQ orchestration binding tests. These run on the host as
+    // ordinary `cargo test` cases so we don't need a wasm-bindgen
+    // browser harness in CI; the JS-facing surface is exercised by
+    // calling the same methods JS would.
+    // -----------------------------------------------------------------
+
+    fn classical_codepoint() -> u16 {
+        u16::from(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+    }
+
+    #[test]
+    fn pq_security_mode_ordering_matches_inner() {
+        // wasm_bindgen-friendly C-enums don't get `PartialOrd` for free,
+        // so compare via the `u8` discriminants. JS callers do the same
+        // — they get plain numeric values back from the wasm module.
+        assert!((SecurityMode::Classical as u8) < (SecurityMode::PqConfidentiality as u8));
+        assert!((SecurityMode::PqConfidentiality as u8) < (SecurityMode::PqAuthenticity as u8));
+    }
+
+    #[test]
+    fn pq_device_capability_round_trips_through_tls() {
+        let cap = DeviceCapability::new(
+            1,
+            vec![classical_codepoint()],
+            vec![],
+            false,
+            false,
+            "rustcrypto-wasm".to_string(),
+        )
+        .expect("DeviceCapability::new must succeed");
+        let bytes = cap.tls_encode().expect("tls_encode");
+        let round = DeviceCapability::tls_decode(&bytes).expect("tls_decode");
+        assert_eq!(round.mls_version(), cap.mls_version());
+        assert_eq!(round.classical_ciphersuites(), cap.classical_ciphersuites());
+        assert_eq!(round.provider_id(), cap.provider_id());
+    }
+
+    #[test]
+    fn pq_select_conversation_mode_with_only_classical_peers_returns_classical() {
+        let cap = DeviceCapability::new(
+            1,
+            vec![classical_codepoint()],
+            vec![],
+            false,
+            false,
+            "rustcrypto-wasm".to_string(),
+        )
+        .unwrap();
+        let result = select_conversation_mode_inner(&[cap.clone(), cap])
+            .expect("select_conversation_mode must succeed for classical-only peers");
+        assert_eq!(result.mode(), SecurityMode::Classical);
+        assert_eq!(result.ciphersuite(), classical_codepoint());
+    }
+
+    #[test]
+    fn pq_select_conversation_mode_rejects_empty_peer_list() {
+        let result = select_conversation_mode_inner(&[]);
+        assert!(result.is_err(), "empty peer list must error out");
+    }
+
+    #[test]
+    fn pq_lifecycle_phase_classical_for_default_state() {
+        // Use the public ConversationLifecycle::Classical projection
+        // directly — the from-state-machine projection is exercised in
+        // the openmls crate's own tests.
+        let phase: LifecyclePhase = (&ConversationLifecycle::Classical).into();
+        assert_eq!(phase, LifecyclePhase::Classical);
+    }
+
+    #[test]
+    fn pq_lifecycle_phase_failed_drops_reason() {
+        let phase: LifecyclePhase = (&ConversationLifecycle::Failed("anything".to_string())).into();
+        assert_eq!(phase, LifecyclePhase::Failed);
     }
 }

@@ -16,8 +16,9 @@
 //!
 //! KeyPackage publication is **bounded**: a device may publish at most
 //! [`MAX_KEY_PACKAGES_PER_DEVICE`] KeyPackages per
-//! [`generate_for_capability`] call. This is a hard floor; the server-side
-//! capability registry enforces an additional cap per device per epoch.
+//! [`MultiCiphersuiteKeyPackages::generate_for_capability`] call. This is a
+//! hard floor; the server-side capability registry enforces an additional
+//! cap per device per epoch.
 
 use std::collections::HashMap;
 
@@ -31,7 +32,7 @@ use crate::key_packages::{
 use crate::storage::OpenMlsProvider;
 
 /// Hard upper bound on the number of KeyPackages a single device may
-/// generate in one [`generate_for_capability`] call.
+/// generate in one [`MultiCiphersuiteKeyPackages::generate_for_capability`] call.
 ///
 /// Phase 1 budgets ~2669 bytes per PQ KeyPackage (X-Wing). 16 packages × ~3
 /// kB ≈ 48 kB per device per publication, which is the per-device budget the

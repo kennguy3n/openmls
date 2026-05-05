@@ -6,7 +6,7 @@
 //! work; it just enforces the *order* in which the orchestration layer
 //! drives the migration so dashboards, recovery code, and tests can
 //! reason about progress without pattern-matching on
-//! [`KChatMlsConversation`] internals.
+//! [`KChatMlsConversation`](crate::group::KChatMlsConversation) internals.
 //!
 //! State transitions:
 //!

@@ -10,13 +10,24 @@ use ds_lib::{ClientKeyPackages, GroupMessage};
 use openmls::prelude::{tls_codec::*, *};
 use openmls_traits::OpenMlsProvider;
 
+use openmls::ciphersuite::security_mode::SecurityMode;
+use openmls::credentials::DeviceCapability;
+use openmls::group::select_conversation_mode;
+
 use super::{
-    backend::Backend, conversation::Conversation, conversation::ConversationMessage,
-    identity::Identity, openmls_rust_persistent_crypto::OpenMlsRustPersistentCrypto,
+    backend::Backend,
+    conversation::{CliSecurityMode, Conversation, ConversationMessage},
+    identity::Identity,
+    openmls_rust_persistent_crypto::OpenMlsRustPersistentCrypto,
     serialize_any_hashmap,
 };
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+/// Identifier baked into every [`DeviceCapability`] this CLI emits.
+const CLI_PROVIDER_ID: &str = "rustcrypto-cli";
+/// MLS protocol version we advertise. The CLI doesn't yet speak MLS 1.1+
+/// extensions, so we pin to MLS 1.0 (codepoint 1).
+const CLI_MLS_VERSION: u16 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Contact {
@@ -33,6 +44,20 @@ pub struct Group {
     group_name: String,
     conversation: Conversation,
     mls_group: RefCell<MlsGroup>,
+    /// PQ orchestration mode this conversation was created in. Stored
+    /// for display-only purposes — the live `mls_group` is always a
+    /// classical MLS group; the CLI does not yet bootstrap the dual
+    /// T+PQ session.
+    #[allow(dead_code)]
+    security_mode: SecurityMode,
+}
+
+impl Group {
+    /// PQ orchestration mode this conversation was created in.
+    #[allow(dead_code)]
+    pub fn security_mode(&self) -> SecurityMode {
+        self.security_mode
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -119,6 +144,10 @@ impl User {
                                     mls_group: RefCell::new(mlsgroup.unwrap().unwrap()),
                                     group_name: group_name.clone(),
                                     conversation: Conversation::default(),
+                                    // The CLI's persisted state predates
+                                    // PQ orchestration, so groups loaded
+                                    // from disk are always classical.
+                                    security_mode: SecurityMode::Classical,
                                 };
                                 groups.insert(group_name.clone(), grp);
                             }
@@ -540,14 +569,48 @@ impl User {
         Ok(messages_out)
     }
 
-    /// Create a group with the given name.
+    /// Create a group with the given name in classical mode.
+    ///
+    /// Used only by the legacy `basic_test` integration test today; the
+    /// REPL goes through [`User::create_group_with_mode`].
+    #[allow(dead_code)]
     pub fn create_group(&mut self, name: String) {
-        log::debug!("{} creates group {}", self.username(), name);
+        // The classical path always succeeds, so the unwrap is fine.
+        self.create_group_with_mode(name, CliSecurityMode::Classical)
+            .expect("classical group creation must always succeed");
+    }
+
+    /// Create a group with the given name and the requested PQ
+    /// orchestration mode. Returns `Err` when the requested mode
+    /// requires a feature flag that wasn't compiled in (e.g.
+    /// `pq-confidentiality` without `--features xwing`).
+    pub fn create_group_with_mode(
+        &mut self,
+        name: String,
+        mode: CliSecurityMode,
+    ) -> Result<(), String> {
+        log::debug!("{} creates {:?} group {}", self.username(), mode, name,);
         let group_id = name.as_bytes();
+
+        // Reject duplicate names BEFORE we ask the provider to create
+        // the underlying `MlsGroup`. `MlsGroup::new_with_group_id`
+        // persists the new group to the storage provider keyed by
+        // `GroupId::from_slice(name.as_bytes())`, so calling it ahead
+        // of this check would overwrite the existing group's persisted
+        // state and leave the in-memory `self.groups` entry pointing
+        // at a stale `MlsGroup` reference. Failing fast here keeps
+        // both the on-disk and in-memory views consistent on the
+        // duplicate-name error path.
+        if self.groups.borrow().contains_key(&name) {
+            return Err(format!("Group '{name}' existed already"));
+        }
+
+        let ciphersuite = mode.default_ciphersuite()?;
 
         // NOTE: Since the DS currently doesn't distribute copies of the group's ratchet
         // tree, we need to include the ratchet_tree_extension.
         let group_config = MlsGroupCreateConfig::builder()
+            .ciphersuite(ciphersuite)
             .use_ratchet_tree_extension(true)
             .build();
 
@@ -558,21 +621,115 @@ impl User {
             GroupId::from_slice(group_id),
             self.identity.borrow().credential_with_key.clone(),
         )
-        .expect("Failed to create MlsGroup");
+        .map_err(|e| format!("Failed to create MlsGroup: {e}"))?;
 
         let group = Group {
             group_name: name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
+            security_mode: mode.to_security_mode(),
         };
-
-        if self.groups.borrow().contains_key(&name) {
-            panic!("Group '{name}' existed already");
-        }
 
         self.groups.borrow_mut().insert(name, group);
 
         self.autosave();
+        Ok(())
+    }
+
+    /// Build a [`DeviceCapability`] for this user's identity and sign
+    /// it with the user's signing key. Mirrors what a real KChat
+    /// device would publish to the capability registry on startup.
+    ///
+    /// Every advertised ciphersuite is probed against the runtime
+    /// crypto provider via
+    /// [`OpenMlsCrypto::supports`](openmls_traits::crypto::OpenMlsCrypto::supports)
+    /// before it is added to the capability. This avoids the failure
+    /// mode where a CLI built with `--features xwing` advertises X-Wing
+    /// even though the underlying provider (RustCrypto) rejects the
+    /// suite at `MlsGroup` creation time.
+    pub fn device_capability(&self) -> Result<DeviceCapability, String> {
+        let crypto = self.provider.crypto();
+
+        // Only advertise what the live provider can actually deliver.
+        // Probing instead of static listing means swapping the provider
+        // (RustCrypto → libcrux) automatically widens the advertised
+        // capability without code edits in this function.
+        let candidate_classical: &[Ciphersuite] = &[
+            CIPHERSUITE,
+            Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+        ];
+        let classical: Vec<Ciphersuite> = candidate_classical
+            .iter()
+            .copied()
+            .filter(|cs| crypto.supports(*cs).is_ok())
+            .collect();
+
+        let candidate_pq: &[Ciphersuite] = &[
+            #[cfg(feature = "xwing")]
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
+            #[cfg(feature = "mldsa")]
+            Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65,
+        ];
+        let pq_ciphersuites: Vec<Ciphersuite> = candidate_pq
+            .iter()
+            .copied()
+            .filter(|cs| crypto.supports(*cs).is_ok())
+            .collect();
+
+        // PQ authenticity additionally requires that the provider can
+        // both KEM and sign with PQ primitives. Probe an ML-DSA-signed
+        // ciphersuite (`MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65`,
+        // codepoint `0xFE05`). If the live provider rejects the suite
+        // — RustCrypto today does — we cannot honestly claim PQ
+        // authenticity, regardless of whether the `mldsa` feature flag
+        // is set on the CLI.
+        #[cfg(feature = "mldsa")]
+        let pq_auth_supported = crypto
+            .supports(Ciphersuite::MLS_256_MLKEM768_X25519_AES256GCM_SHA384_MLDSA65)
+            .is_ok();
+        #[cfg(not(feature = "mldsa"))]
+        let pq_auth_supported = false;
+
+        let apq_supported = !pq_ciphersuites.is_empty();
+
+        let mut cap = DeviceCapability::new(
+            CLI_MLS_VERSION,
+            classical,
+            pq_ciphersuites,
+            apq_supported,
+            pq_auth_supported,
+            CLI_PROVIDER_ID.to_string(),
+        );
+
+        let identity = self.identity.borrow();
+        cap.sign(
+            CIPHERSUITE.signature_algorithm(),
+            identity.signer.private(),
+            self.provider.crypto(),
+        )
+        .map_err(|e| format!("DeviceCapability::sign failed: {e}"))?;
+
+        Ok(cap)
+    }
+
+    /// Run [`select_conversation_mode`] over `peers` (plus this user's
+    /// own capability) and return the chosen mode + ciphersuite.
+    ///
+    /// The CLI uses this when displaying mode info to a user before
+    /// committing to a particular conversation security tier.
+    pub fn select_conversation_mode(
+        &self,
+        peers: &[DeviceCapability],
+    ) -> Result<(SecurityMode, Ciphersuite), String> {
+        let mine = self
+            .device_capability()
+            .map_err(|e| format!("self capability: {e}"))?;
+        let mut all: Vec<&DeviceCapability> = Vec::with_capacity(peers.len() + 1);
+        all.push(&mine);
+        for p in peers {
+            all.push(p);
+        }
+        select_conversation_mode(&all).map_err(|e| format!("select_conversation_mode: {e}"))
     }
 
     /// Invite user with the given name to the group.
@@ -710,6 +867,12 @@ impl User {
             group_name: group_name.clone(),
             conversation: Conversation::default(),
             mls_group: RefCell::new(mls_group),
+            // The CLI joins from a Welcome message and does not yet
+            // exchange a `DeviceCapability` over the wire, so the
+            // joined group is recorded as classical-only. A future
+            // patch can carry the negotiated mode in
+            // `Welcome::encrypted_group_info`.
+            security_mode: SecurityMode::Classical,
         };
 
         log::trace!("   {group_name}");
