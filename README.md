@@ -3,8 +3,8 @@
 [![OpenMLS Chat][chat-image]][chat-link]
 [![OpenMLS List][list-image]][list-link]
 
-[![Tests & Checks][gh-tests-image]](https://github.com/openmls/openmls/actions/workflows/tests.yml?branch=main)
-[![codecov][codecov-image]](https://codecov.io/gh/openmls/openmls)
+[![Tests & Checks][gh-tests-image]](https://github.com/kennguy3n/openmls/actions/workflows/tests.yml?branch=main)
+[![codecov][codecov-image]](https://codecov.io/gh/kennguy3n/openmls)
 
 [![Docs][docs-release-badge]][docs-release-link]
 [![Book][book-release-badge]][book-release-link]
@@ -472,9 +472,9 @@ OpenMLS is maintained and developed by [Phoenix R&D] and [Cryspen].
 [book-release-badge]: https://img.shields.io/badge/book-release-blue.svg?style=for-the-badge
 [book-release-link]: https://book.openmls.tech
 [drone-image]: https://img.shields.io/drone/build/openmls/openmls/main?label=ARM64%20Build%20Status&logo=drone&style=for-the-badge
-[codecov-image]: https://img.shields.io/codecov/c/github/openmls/openmls/main?logo=codecov&style=for-the-badge
-[gh-tests-image]: https://img.shields.io/github/actions/workflow/status/openmls/openmls/tests.yml?branch=main&style=for-the-badge&logo=github
-[gh-deploy-docs-image]: https://img.shields.io/github/workflow/status/openmls/openmls/Deploy%20Docs/main?label=Deploy%20Docs&logo=github&style=for-the-badge
+[codecov-image]: https://img.shields.io/codecov/c/github/kennguy3n/openmls/main?logo=codecov&style=for-the-badge
+[gh-tests-image]: https://img.shields.io/github/actions/workflow/status/kennguy3n/openmls/tests.yml?branch=main&style=for-the-badge&logo=github
+[gh-deploy-docs-image]: https://img.shields.io/github/workflow/status/kennguy3n/openmls/Deploy%20Docs/main?label=Deploy%20Docs&logo=github&style=for-the-badge
 [Developer.md]: https://github.com/openmls/openmls/blob/main/Developer.md
 [Phoenix R&D]: https://phnx.im
 [Cryspen]: https://cryspen.com

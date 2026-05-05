@@ -1,7 +1,7 @@
 # Proposal: Quantum-Resistant E2E Encryption for KChat (OpenMLS Fork)
 
 Status: Active — Phase 0 complete; Phases 1–6 in progress (~95%)
-Last updated: 2026-05-04 (PQ batch 6)
+Last updated: 2026-05-05 (PQ batch 6 — doc reconciliation)
 
 ## 1. Project Goal
 
